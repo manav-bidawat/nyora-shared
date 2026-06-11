@@ -6,8 +6,12 @@ import java.util.Base64
 import java.util.Properties
 
 object SupabaseConfig {
-    var url: String = ""
-    var anonKey: String = ""
+    // Non-confidential defaults so a freshly-cloned app repo runs without the dev
+    // .env.sync. The Supabase URL + publishable anon key are public by design, and
+    // the desktop OAuth client secret is non-confidential (Google ships it in
+    // installed apps). env vars / .env.sync still override these via load().
+    var url: String = "https://fqguzcoytnbnjwaddakn.supabase.co"
+    var anonKey: String = "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
     var accessToken: String = ""
     var refreshToken: String = ""
     var userId: String = ""
