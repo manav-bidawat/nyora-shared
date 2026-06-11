@@ -1,0 +1,302 @@
+package com.nyora.hasan72341.shared
+
+import com.nyora.hasan72341.shared.data.ExtensionInstaller
+import com.nyora.hasan72341.shared.data.SourceCatalogClient
+import com.nyora.hasan72341.shared.net.HelperNetworkConfig
+import com.nyora.hasan72341.shared.model.MangaSource
+import com.nyora.hasan72341.shared.model.SourceEngine
+import com.nyora.hasan72341.shared.proxy.NyoraRestServer
+import com.nyora.hasan72341.shared.reader.PageImageLoader
+import com.nyora.hasan72341.shared.repository.JsonToSqlMigration
+import com.nyora.hasan72341.shared.repository.SqlDelightLibraryRepository
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.writeText
+
+object HelperMain {
+
+    /** Bootstrapped state shared by every entry point (desktop helper, web server). */
+    class Bootstrap(
+        val repository: SqlDelightLibraryRepository,
+        val facade: NyoraFacade,
+        val downloads: com.nyora.hasan72341.shared.download.DownloadManager,
+        val networkConfig: HelperNetworkConfig,
+    )
+
+    /**
+     * Open the DB, run migrations, seed the built-in source catalog and wire up
+     * a [NyoraFacade] + [com.nyora.hasan72341.shared.download.DownloadManager]. Reused by
+     * both the loopback desktop helper and the deployable web server so source
+     * seeding stays in one place.
+     */
+    fun bootstrap(): Bootstrap {
+        val repository = SqlDelightLibraryRepository()
+        JsonToSqlMigration.runIfNeeded(repository)
+        seedBuiltInSources(repository)
+
+        val (mangaCount, sourceCount) = repository.count()
+
+        val networkConfig = HelperNetworkConfig()
+        // Check for an OTA parser update in the background; applies on next launch.
+        com.nyora.hasan72341.shared.extension.ParserOtaUpdater.updateInBackground(
+            SqlDelightLibraryRepository.defaultDatabasePath().parent,
+            networkConfig,
+        )
+        val runtime = com.nyora.hasan72341.shared.extension.JvmExtensionRuntime(
+            networkConfig = networkConfig,
+        )
+        val facade = NyoraFacade(
+            repository = repository,
+            runtime = runtime,
+        )
+        val downloadManager = com.nyora.hasan72341.shared.download.DownloadManager(facade = facade)
+
+        // Supabase Sync initialization
+        val dataDir = SqlDelightLibraryRepository.defaultDatabasePath().parent
+        com.nyora.hasan72341.shared.sync.SupabaseConfig.load(dataDir)
+        
+        // Always try loading .env.sync if it exists (prioritize these values)
+
+        // Search for .env.sync in standard locations
+        val envPaths = listOf(
+            java.nio.file.Path.of(".env.sync"),
+            java.nio.file.Path.of("../.env.sync"),
+            java.nio.file.Path.of("../../.env.sync")
+        )
+        for (envSync in envPaths) {
+            if (java.nio.file.Files.exists(envSync)) {
+                val props = java.util.Properties()
+                java.nio.file.Files.newInputStream(envSync).use { props.load(it) }
+                props.getProperty("SUPABASE_URL")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.url = it }
+                props.getProperty("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.anonKey = it }
+                props.getProperty("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleDesktopClientId = it }
+                props.getProperty("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleServerClientId = it }
+                props.getProperty("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleClientSecret = it }
+                break
+            }
+        }
+        run {
+            val envSync = Path.of("../.env.sync")
+            if (Files.exists(envSync)) {
+                val props = java.util.Properties()
+                Files.newInputStream(envSync).use { props.load(it) }
+                com.nyora.hasan72341.shared.sync.SupabaseConfig.url = props.getProperty("SUPABASE_URL", "")
+                com.nyora.hasan72341.shared.sync.SupabaseConfig.anonKey = props.getProperty("SUPABASE_ANON_KEY", "")
+                props.getProperty("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let {
+                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleDesktopClientId = it
+                }
+                props.getProperty("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let {
+                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleServerClientId = it
+                }
+                props.getProperty("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let {
+                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleClientSecret = it
+                }
+            }
+        }
+
+        if (com.nyora.hasan72341.shared.sync.SupabaseConfig.isConfigured) {
+            val sync = com.nyora.hasan72341.shared.sync.SupabaseSync(repository, dataDir)
+            repository.supabaseSync = sync
+            // Trigger an initial pull in the background if we are authenticated
+            if (com.nyora.hasan72341.shared.sync.SupabaseConfig.isAuthenticated) {
+                Thread {
+                    sync.refreshToken()
+                    sync.pullAll()
+                }.also { it.isDaemon = true; it.name = "supabase-initial-pull" }.start()
+            }
+        }
+
+        return Bootstrap(repository, facade, downloadManager, networkConfig)
+    }
+
+    @JvmStatic
+    fun main(args: Array<String>) {
+        val boot = bootstrap()
+        val facade = boot.facade
+        val downloadManager = boot.downloads
+        val server = NyoraRestServer(
+            facade = facade,
+            catalog = SourceCatalogClient(networkConfig = boot.networkConfig),
+            installer = ExtensionInstaller(networkConfig = boot.networkConfig),
+            pageLoader = PageImageLoader(networkConfig = boot.networkConfig),
+            downloads = downloadManager,
+            networkConfig = boot.networkConfig,
+        )
+
+        val baseUrl = server.start()
+        val port = baseUrl.substringAfterLast(":")
+        println("Nyora helper listening at $baseUrl")
+
+        val portFilePath = System.getProperty("nyora.helper.port-file")
+            ?: System.getenv("NYORA_HELPER_PORT_FILE")
+            ?: defaultPortFile().toString()
+        val portFile = Path.of(portFilePath)
+        Files.createDirectories(portFile.parent ?: Path.of("."))
+        portFile.writeText(port)
+
+        Runtime.getRuntime().addShutdownHook(Thread {
+            runCatching { Files.deleteIfExists(portFile) }
+            server.stop()
+        })
+
+        // Parent-PID watchdog: if our launcher (SwiftUI app) dies without a
+        // clean termination, exit so we don't linger as a zombie helper.
+        startParentWatchdog(args)
+
+        Thread.currentThread().join()
+    }
+
+    private fun startParentWatchdog(args: Array<String>) {
+        val watchedPid = args.firstNotNullOfOrNull { arg ->
+            arg.removePrefix("--watch-pid=").takeIf { it != arg && it.isNotBlank() }?.toLongOrNull()
+        } ?: System.getProperty("nyora.watch.pid")?.toLongOrNull()
+        ?: System.getenv("NYORA_WATCH_PID")?.toLongOrNull()
+        ?: return
+
+        val thread = Thread {
+            while (true) {
+                if (!ProcessHandle.of(watchedPid).map { it.isAlive }.orElse(false)) {
+                    System.err.println("Watched parent pid $watchedPid is gone, shutting down helper.")
+                    System.exit(0)
+                }
+                Thread.sleep(1500)
+            }
+        }
+        thread.isDaemon = true
+        thread.name = "nyora-parent-watchdog"
+        thread.start()
+    }
+
+    private fun defaultPortFile(): Path {
+        val osName = System.getProperty("os.name", "").lowercase()
+        val home = Path.of(System.getProperty("user.home"))
+        val dir = when {
+            osName.contains("win") -> {
+                val appData = System.getenv("APPDATA")?.takeIf { it.isNotBlank() }
+                    ?: home.resolve("AppData").resolve("Roaming").toString()
+                Path.of(appData, "Nyora")
+            }
+            osName.contains("mac") ->
+                home.resolve("Library").resolve("Application Support").resolve("Nyora")
+            else -> {
+                val base = System.getenv("XDG_CONFIG_HOME")?.let { Path.of(it) }
+                    ?: home.resolve(".config")
+                base.resolve("nyora")
+            }
+        }
+        Files.createDirectories(dir)
+        return dir.resolve("helper.port")
+    }
+
+    private fun seedBuiltInSources(repository: SqlDelightLibraryRepository) {
+        // One-time cleanup: drop every Mihon-engine source row from the DB.
+        // Mihon APKs need a Dalvik-compatible runtime which the desktop JVM
+        // doesn't provide, so these rows can never be opened. Removing them
+        // also clears stale references that history rows may still point at.
+        val current = repository.load()
+        val (mihonRows, keepRows) = current.sources.partition {
+            it.engine == SourceEngine.Mihon
+        }
+        for (row in mihonRows) repository.deleteSource(row.id)
+        val existing = keepRows.associateBy { it.id }
+
+        // Every `parser:` id that the bundled JS engine (parsers.bundle.js) can
+        // actually open. The DB may still carry orphaned `parser:` rows seeded by
+        // an older, larger catalogue; any `parser:` source NOT in this set is
+        // pruned below so the visible catalogue matches the JS bundle exactly
+        // (same set the iOS app ships). Deleting a manga_source row is safe — no
+        // FK references it, so the user's library/history/favourites are untouched.
+        val validParserIds = HashSet<String>()
+
+        // Pre-installed catalogue = the iOS-curated source set (ported from the
+        // Nyora iOS app's NyoraEngine) plus the native defaults. Every other
+        // parser ships available-but-not-installed so the user opts in — this
+        // also keeps global search fast, since it only fans out over installed
+        // sources.
+        val nativeDefaults = setOf("MANGADEX", "MANGAPLUS", "MANGAREADER", "ASURASCANS", "ASURASCANS_US", "MANGAFIRE_EN", "MANGAFIRE_JA", "COMICK_FUN")
+        fun isCurated(name: String) = name in IosCuratedSources.CURATED || name in nativeDefaults
+        // One-time migration: older builds seeded EVERY parser as installed.
+        // Flip non-curated parser rows to not-installed exactly once, then leave
+        // the user's later install/uninstall choices alone.
+        val curatedMarker = SqlDelightLibraryRepository.defaultDatabasePath().parent.resolve(".curated_sources_v1")
+        val curatedMigrationDone = Files.exists(curatedMarker)
+
+        if (existing.containsKey("demo:javascript")) {
+            repository.deleteSource("demo:javascript")
+        }
+
+        // Seed every parser in the catalog — preferring an OTA-downloaded
+        // sources.json (kept in lockstep with the OTA bundle), else the bundled one.
+        val otaBase = SqlDelightLibraryRepository.defaultDatabasePath().parent
+        val jsonText = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.sources(otaBase)
+            ?: javaClass.classLoader.getResourceAsStream("parsers_sources.json")?.bufferedReader()?.readText()
+        if (jsonText != null) {
+            val array = kotlinx.serialization.json.Json.parseToJsonElement(jsonText).let {
+                if (it is kotlinx.serialization.json.JsonArray) it else kotlinx.serialization.json.JsonArray(emptyList())
+            }
+            for (element in array) {
+                if (element !is kotlinx.serialization.json.JsonObject) continue
+                val parserName = element["id"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: continue
+                val id = "parser:$parserName"
+                validParserIds.add(id)
+                val isNsfw = element["isNsfw"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content?.toBoolean() ?: false
+                
+                val title = element["title"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: parserName
+                val locale = element["locale"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: "all"
+                val domain = element["domain"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: ""
+                val prior = existing[id]
+                if (prior != null) {
+                    var updated = prior.copy(
+                        name = SourcePatches.TITLE_OVERRIDES[parserName] ?: title,
+                        lang = locale,
+                        baseUrl = "https://$domain",
+                        engine = SourceEngine.JavaScript,
+                        contentType = com.nyora.hasan72341.shared.model.SourceContentType.Manga,
+                        notes = "Built-in JS parser.",
+                        localPath = "classpath:parsers.bundle.js",
+                        canUninstall = false,
+                    )
+                    if (prior.isNsfw != isNsfw) updated = updated.copy(isNsfw = isNsfw)
+                    if (!curatedMigrationDone) {
+                        val shouldInstall = isCurated(parserName)
+                        if (updated.isInstalled != shouldInstall) updated = updated.copy(isInstalled = shouldInstall)
+                    }
+                    if (updated != prior) repository.upsertSource(updated)
+                    continue
+                }
+                repository.upsertSource(
+                    MangaSource(
+                        id = id,
+                        name = SourcePatches.TITLE_OVERRIDES[parserName] ?: title,
+                        lang = locale,
+                        baseUrl = "https://$domain",
+                        isInstalled = isCurated(parserName),
+                        isNsfw = isNsfw,
+                        engine = SourceEngine.JavaScript,
+                        notes = "Built-in JS parser.",
+                        canUninstall = false,
+                    )
+                )
+            }
+
+            // Prune orphaned parser sources: anything in the DB tagged `parser:`
+            // that the current bundle no longer ships (e.g. the ~800 legacy Nyora
+            // sources from an older catalogue). Without this the Explore list shows
+            // sources whose JS parser doesn't exist -> "Parser not found" on browse.
+            // Guard on a non-empty valid set so a missing/corrupt resource can't wipe
+            // the whole catalogue.
+            if (validParserIds.isNotEmpty()) {
+                for (row in keepRows) {
+                    if (row.id.startsWith("parser:") && row.id !in validParserIds) {
+                        repository.deleteSource(row.id)
+                    }
+                }
+            }
+        }
+
+        if (!curatedMigrationDone) {
+            runCatching { Files.writeString(curatedMarker, "v1") }
+        }
+    }
+
+}
