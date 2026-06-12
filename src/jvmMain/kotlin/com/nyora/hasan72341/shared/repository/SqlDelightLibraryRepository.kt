@@ -37,6 +37,9 @@ import kotlin.io.path.absolutePathString
  *   - history           (Phase 4 reader + history)
  *   - favourites / categories (Phase 5)
  */
+/** A favourite category for sync push — includes soft-deleted rows (deletedAt != null). */
+data class CategorySyncRow(val id: Long, val title: String, val sortKey: Long, val deletedAt: Long?)
+
 class SqlDelightLibraryRepository(
     dbPath: Path = defaultDatabasePath(),
 ) : LibraryRepository {
@@ -46,6 +49,12 @@ class SqlDelightLibraryRepository(
         ensureSchema(driver)
     }
     internal val database = NyoraDatabase(driver)
+
+    init {
+        // Collapse duplicate-title favourite categories that piled up via sync (each device
+        // historically created its own "Read later"). Idempotent — a no-op once deduped.
+        dedupeCategories()
+    }
 
     // Supabase sync — set by the app after SupabaseConfig is loaded and the user has signed in.
     // Fire-and-forget: called on a daemon thread after each mutating operation.
@@ -135,6 +144,37 @@ class SqlDelightLibraryRepository(
                 .onFailure { System.err.println("ALTER failed for $table.$column: ${it.message}") }
         }
     }
+
+    /**
+     * Collapse duplicate same-title favourite categories (legacy per-device "Read later" seeds
+     * replicated across devices by sync). Keep the lowest id per title, repoint manga->category
+     * links onto it, and soft-delete the rest so the deletion propagates on the next push.
+     */
+    fun dedupeCategories() {
+        runCatching {
+            driver.execute(
+                null,
+                "UPDATE OR IGNORE manga_favourite_category SET category_id = " +
+                    "(SELECT MIN(c.id) FROM favourite_category c WHERE c.deleted_at IS NULL AND c.title = " +
+                    "(SELECT t.title FROM favourite_category t WHERE t.id = manga_favourite_category.category_id)) " +
+                    "WHERE category_id IN (SELECT c.id FROM favourite_category c WHERE c.deleted_at IS NULL AND c.id <> " +
+                    "(SELECT MIN(c2.id) FROM favourite_category c2 WHERE c2.deleted_at IS NULL AND c2.title = c.title))",
+                0,
+            )
+            driver.execute(
+                null,
+                "UPDATE favourite_category SET deleted_at = ${System.currentTimeMillis()} " +
+                    "WHERE deleted_at IS NULL AND id <> " +
+                    "(SELECT MIN(c2.id) FROM favourite_category c2 WHERE c2.deleted_at IS NULL AND c2.title = favourite_category.title)",
+                0,
+            )
+        }.onFailure { System.err.println("dedupeCategories failed: ${it.message}") }
+    }
+
+    /** All categories incl. soft-deleted, for sync push (so deletions propagate). */
+    fun categoriesForSync(): List<CategorySyncRow> =
+        database.favouriteCategoryQueries.selectAllCategoriesIncludingDeleted().executeAsList()
+            .map { CategorySyncRow(it.id, it.title, it.sort_key, it.deleted_at) }
 
     override fun load(): Library = database.transactionWithResult {
         val mangas = database.mangaQueries.selectAll().executeAsList().map { row -> row.toManga() }

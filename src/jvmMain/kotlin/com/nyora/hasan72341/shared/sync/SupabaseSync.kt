@@ -286,12 +286,20 @@ class SupabaseSync(
     }
 
     private fun pushCategories() {
-        val cats = repo.favouriteCategories()
+        // Include soft-deleted categories so deletions (e.g. duplicate cleanup) propagate.
+        val cats = repo.categoriesForSync()
         if (cats.isEmpty()) return
         val uid = SupabaseConfig.userId
         val now = Instant.now().toString()
         val rows = cats.map { c ->
-            SbCategory(user_id = uid, id = c.id.toString(), title = c.title, sort_key = c.sortKey.toInt(), updated_at = now)
+            SbCategory(
+                user_id = uid,
+                id = c.id.toString(),
+                title = c.title,
+                sort_key = c.sortKey.toInt(),
+                updated_at = now,
+                deleted_at = c.deletedAt?.let { Instant.ofEpochMilli(it).toString() },
+            )
         }
         upsert("nyora_category", rows)
     }
@@ -501,6 +509,8 @@ class SupabaseSync(
                     }
                 }
             }
+            // Collapse any duplicate-title categories that arrived from legacy per-device seeds.
+            repo.dedupeCategories()
         }.onFailure { System.err.println("[SupabaseSync] pullCategories failed: ${it.message}") }.getOrThrow()
     }
 

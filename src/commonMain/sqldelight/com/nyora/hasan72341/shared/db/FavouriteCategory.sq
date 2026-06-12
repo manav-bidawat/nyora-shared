@@ -24,6 +24,11 @@ FROM favourite_category
 WHERE deleted_at IS NULL
 ORDER BY sort_key, LOWER(title);
 
+selectAllCategoriesIncludingDeleted:
+SELECT id, title, sort_key, created_at, deleted_at
+FROM favourite_category
+ORDER BY sort_key, LOWER(title);
+
 selectCategoriesForManga:
 SELECT c.id, c.title, c.sort_key, c.created_at
 FROM manga_favourite_category mc
