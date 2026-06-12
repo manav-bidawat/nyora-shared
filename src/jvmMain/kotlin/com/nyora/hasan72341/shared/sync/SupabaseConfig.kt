@@ -25,17 +25,20 @@ object SupabaseConfig {
     val isAuthenticated: Boolean get() = accessToken.isNotBlank() && userId.isNotBlank()
 
     fun load(dataDir: Path) {
+        val env = readEnvSync()
         url = System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }
+            ?: env["SUPABASE_URL"]?.takeIf { it.isNotBlank() }
             ?: readProp(dataDir, "url").takeIf { it.isNotBlank() }
             ?: "https://fqguzcoytnbnjwaddakn.supabase.co"
         anonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }
+            ?: env["SUPABASE_ANON_KEY"]?.takeIf { it.isNotBlank() }
             ?: readProp(dataDir, "anon_key").takeIf { it.isNotBlank() }
             ?: "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
-        
-        // Prioritize env vars/properties for these too
-        System.getenv("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { googleDesktopClientId = it }
-        System.getenv("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { googleServerClientId = it }
-        System.getenv("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let { googleClientSecret = it }
+
+        // Prioritize env vars / .env.sync for these too
+        (System.getenv("GOOGLE_DESKTOP_CLIENT_ID") ?: env["GOOGLE_DESKTOP_CLIENT_ID"])?.takeIf { it.isNotBlank() }?.let { googleDesktopClientId = it }
+        (System.getenv("GOOGLE_SERVER_CLIENT_ID") ?: env["GOOGLE_SERVER_CLIENT_ID"])?.takeIf { it.isNotBlank() }?.let { googleServerClientId = it }
+        (System.getenv("GOOGLE_CLIENT_SECRET") ?: env["GOOGLE_CLIENT_SECRET"])?.takeIf { it.isNotBlank() }?.let { googleClientSecret = it }
 
         val tokenFile = dataDir.resolve("supabase_tokens.properties")
         if (Files.exists(tokenFile)) {
@@ -84,5 +87,21 @@ object SupabaseConfig {
         return Properties()
             .also { it.load(Files.newBufferedReader(file)) }
             .getProperty(key, "")
+    }
+
+    // Reads KEY=VALUE pairs from a .env.sync in the working directory (active,
+    // uncommented lines), letting a committed env file override the baked defaults.
+    private fun readEnvSync(): Map<String, String> {
+        val file = Path.of(System.getProperty("user.dir") ?: ".", ".env.sync")
+        if (!Files.exists(file)) return emptyMap()
+        return runCatching {
+            Files.readAllLines(file).mapNotNull { line ->
+                val t = line.trim()
+                if (t.isEmpty() || t.startsWith("#")) return@mapNotNull null
+                val i = t.indexOf('=')
+                if (i <= 0) return@mapNotNull null
+                t.substring(0, i).trim() to t.substring(i + 1).trim()
+            }.toMap()
+        }.getOrDefault(emptyMap())
     }
 }
