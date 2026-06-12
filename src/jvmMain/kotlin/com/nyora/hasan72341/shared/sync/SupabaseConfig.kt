@@ -89,19 +89,24 @@ object SupabaseConfig {
             .getProperty(key, "")
     }
 
-    // Reads KEY=VALUE pairs from a .env.sync in the working directory (active,
-    // uncommented lines), letting a committed env file override the baked defaults.
+    // Reads KEY=VALUE pairs (active, uncommented lines) from the canonical env
+    // owned by nyora-shared, then a local .env.sync in the working dir as an
+    // override. Lets the private shared engine own one env for all desktop apps.
     private fun readEnvSync(): Map<String, String> {
-        val file = Path.of(System.getProperty("user.dir") ?: ".", ".env.sync")
-        if (!Files.exists(file)) return emptyMap()
-        return runCatching {
-            Files.readAllLines(file).mapNotNull { line ->
-                val t = line.trim()
-                if (t.isEmpty() || t.startsWith("#")) return@mapNotNull null
-                val i = t.indexOf('=')
-                if (i <= 0) return@mapNotNull null
-                t.substring(0, i).trim() to t.substring(i + 1).trim()
-            }.toMap()
-        }.getOrDefault(emptyMap())
+        val dir = System.getProperty("user.dir") ?: "."
+        val merged = LinkedHashMap<String, String>()
+        for (rel in listOf("nyora-shared/.env.sync", ".env.sync")) {
+            val file = Path.of(dir, rel)
+            if (!Files.exists(file)) continue
+            runCatching {
+                Files.readAllLines(file).forEach { line ->
+                    val t = line.trim()
+                    if (t.isEmpty() || t.startsWith("#")) return@forEach
+                    val i = t.indexOf('=')
+                    if (i > 0) merged[t.substring(0, i).trim()] = t.substring(i + 1).trim()
+                }
+            }
+        }
+        return merged
     }
 }
