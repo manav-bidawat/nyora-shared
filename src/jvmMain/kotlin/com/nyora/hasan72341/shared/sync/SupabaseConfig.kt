@@ -7,9 +7,9 @@ import java.util.Properties
 
 object SupabaseConfig {
     // Non-confidential defaults so a freshly-cloned app repo runs without the dev
-    // .env.sync. The Supabase URL + publishable anon key are public by design, and
-    // the desktop OAuth client secret is non-confidential (Google ships it in
-    // installed apps). env vars / .env.sync still override these via load().
+    // .env.sync. The Supabase URL + publishable anon key and the OAuth client IDs
+    // are public by design (RLS protects the data; client IDs ship in every OAuth
+    // request). env vars / .env.sync override these via load().
     var url: String = "https://fqguzcoytnbnjwaddakn.supabase.co"
     var anonKey: String = "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
     var accessToken: String = ""
@@ -19,6 +19,8 @@ object SupabaseConfig {
     var lastSyncTimestamp: String = "1970-01-01T00:00:00Z"
     var googleDesktopClientId: String = "181067068545-5r2ob1jv4mc0v8gd52fgk2jt28pk3370.apps.googleusercontent.com"
     var googleServerClientId: String = "181067068545-4jkfesn716ucqbuhcbtvdtlqfg3ar38u.apps.googleusercontent.com"
+    // Provided at build/run time via GOOGLE_CLIENT_SECRET env var or .env.sync —
+    // never baked into the open-source tree. load() fills this in.
     var googleClientSecret: String = ""
 
     val isConfigured: Boolean get() = url.isNotBlank() && anonKey.isNotBlank()
