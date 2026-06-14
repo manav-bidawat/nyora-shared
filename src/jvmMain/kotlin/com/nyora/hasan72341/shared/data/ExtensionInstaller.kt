@@ -19,10 +19,12 @@ class ExtensionInstaller(
             "Source has no downloadable extension artifact"
         }
         Files.createDirectories(extensionsDir)
+        val fallbackName = "${source.id.replace(':', '_')}.bin"
         val filename = source.sourceCodeUrl
             .substringAfterLast('/')
             .substringAfterLast('\\')
-            .ifBlank { "${source.id.replace(':', '_')}.bin" }
+            .ifBlank { fallbackName }
+            .let { if (it == "." || it == "..") fallbackName else it }
         val target = extensionsDir.resolve(filename)
         val settings = networkConfig.snapshot()
         Files.write(target, fetchBytes(rewriteRemoteUrl(source.sourceCodeUrl, settings, RemoteUrlKind.General), settings))
