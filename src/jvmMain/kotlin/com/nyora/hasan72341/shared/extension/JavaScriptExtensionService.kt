@@ -29,7 +29,28 @@ class JavaScriptExtensionService(
     // We share a single GraalJS context for all parsers to avoid evaluating the large bundle multiple times.
     // However, for simplicity in this migration, we'll keep it per-instance but evaluate the bundle.
     private val context: Context by lazy { createContext() }
-    
+
+    // GraalVM polyglot Contexts are THREAD-CONFINED: a Context built without explicit
+    // multi-thread access (as ours is, see createContext) records the first thread that
+    // enters it and throws IllegalStateException ("Multi threaded access requested by
+    // thread ... but is not allowed") if a DIFFERENT thread later enters — even when the
+    // accesses never overlap in time. The previous `synchronized(evalLock)` only prevented
+    // concurrent access; it did NOT pin a single owning thread, so successive REST requests
+    // arriving on different Dispatchers.IO / cached-thread-pool threads crashed on Windows.
+    //
+    // Fix: confine ALL Context access to one dedicated daemon thread per source. The
+    // single-thread executor also serialises calls (FIFO task queue), so the old lock is
+    // redundant. This is per-source, so different sources keep running in parallel exactly
+    // as before (each already had its own Context).
+    //
+    // Lifecycle note: this executor is a daemon and lives for the lifetime of the cached
+    // service (services are cached per source for the session — see JvmExtensionRuntime).
+    // No explicit shutdown is performed. If sources are ever evicted from that cache, add
+    // a close()/jsThread.shutdown() hook to avoid leaking one thread per evicted source.
+    private val jsThread = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "nyora-js-$jsEngineId").apply { isDaemon = true }
+    }
+
     private val jsEngineId: String
         get() = source.id.removePrefix("parser:")
     private val sourceRefName: String
@@ -41,11 +62,15 @@ class JavaScriptExtensionService(
         return emptyMap()
     }
 
+    // NOTE: the `map` lambda runs ON the source's owning JS thread (see invokeParserAsync)
+    // because it reads members off the returned GraalVM Value, and Value access re-enters
+    // the thread-confined Context. The lambda returns only plain Kotlin data classes, which
+    // are safe to hand back to the calling pool thread.
     override suspend fun getPopular(page: Int): MangaSearchPage =
-        mapMangaPage(invokeParserAsync("list", mapOf("page" to page, "order" to "POPULARITY")))
+        invokeParserAsync("list", mapOf("page" to page, "order" to "POPULARITY")) { mapMangaPage(it) }
 
     override suspend fun getLatest(page: Int): MangaSearchPage =
-        mapMangaPage(invokeParserAsync("list", mapOf("page" to page, "order" to "UPDATED")))
+        invokeParserAsync("list", mapOf("page" to page, "order" to "UPDATED")) { mapMangaPage(it) }
 
     override suspend fun search(
         query: String,
@@ -53,18 +78,19 @@ class JavaScriptExtensionService(
         filters: List<SourceFilter>,
     ): MangaSearchPage {
         // TODO map filters if needed
-        return mapMangaPage(invokeParserAsync("list", mapOf("page" to page, "order" to "RELEVANCE", "filter" to mapOf("query" to query))))
+        return invokeParserAsync("list", mapOf("page" to page, "order" to "RELEVANCE", "filter" to mapOf("query" to query))) { mapMangaPage(it) }
     }
 
     override suspend fun getDetails(url: String): MangaDetails {
-        val result = invokeParserAsync("details", mapOf("url" to url, "id" to url))
-        val manga = mapManga(result) ?: error("Extension returned no manga for details")
-        val chapters = result.getMember("chapters")?.let { mapChapters(it) }.orEmpty()
-        return MangaDetails(manga = manga, chapters = chapters)
+        return invokeParserAsync("details", mapOf("url" to url, "id" to url)) { result ->
+            val manga = mapManga(result) ?: error("Extension returned no manga for details")
+            val chapters = result.getMember("chapters")?.let { mapChapters(it) }.orEmpty()
+            MangaDetails(manga = manga, chapters = chapters)
+        }
     }
 
     override suspend fun getPageList(chapter: MangaChapter): List<MangaPage> {
-        return mapPages(invokeParserAsync("pages", mapOf("url" to chapter.url, "id" to chapter.url)))
+        return invokeParserAsync("pages", mapOf("url" to chapter.url, "id" to chapter.url)) { mapPages(it) }
     }
 
     private fun createContext(): Context {
@@ -289,7 +315,11 @@ class JavaScriptExtensionService(
             }
     }
 
-    private fun invokeParserAsync(method: String, args: Map<String, Any>): Value {
+    // `map` converts the parser's GraalVM Value result into plain Kotlin model objects.
+    // It MUST run on jsThread alongside the eval, because traversing the Value (getMember /
+    // arraySize / asString …) re-enters the thread-confined Context; doing it on the calling
+    // pool thread would re-trigger the very multi-thread access crash this change fixes.
+    private fun <R> invokeParserAsync(method: String, args: Map<String, Any>, map: (Value) -> R): R {
         // Recursive conversion so nested args (e.g. the SEARCH filter map
         // {"query": ...}) survive as real JSON objects/arrays instead of being
         // flattened to a Kotlin map's toString() — which silently broke search.
@@ -330,12 +360,29 @@ class JavaScriptExtensionService(
             })();
         """.trimIndent()
         
-        // The GraalVM context is cached per source and may be hit by concurrent
-        // REST requests; contexts are single-threaded, so serialize access.
-        return synchronized(evalLock) { awaitPromise(context.eval("js", jsCode)) }
+        // Run the WHOLE unit of Context work (lazy Context creation on first use, the
+        // eval, and awaitPromise's pump loop) on the source's single owning thread, then
+        // block the calling pool thread on the Future. This keeps the public suspend API
+        // unchanged: the suspend methods still call invokeParserAsync synchronously from
+        // inside their runBlocking context; only the eval dispatch moves off the calling
+        // thread. The calling thread holds NO lock while it waits — it just blocks on
+        // Future.get() — so there is no risk of holding a lock across a suspend point.
+        //
+        // Re-entrancy safety: this Callable must never call back into invokeParserAsync
+        // (that would submit a new task to the same single thread and self-deadlock on
+        // Future.get). The JS host bridge (HostBridge.http / parseHTML / finalUrl) only
+        // performs OkHttp/Jsoup work and does not re-invoke the parser, so this is safe.
+        return try {
+            jsThread.submit(java.util.concurrent.Callable {
+                map(awaitPromise(context.eval("js", jsCode)))
+            }).get()
+        } catch (e: java.util.concurrent.ExecutionException) {
+            // Unwrap so the parser's own error (incl. the "Cloudflare challenge: " marker
+            // that clients key on, and the cleaned promise-rejection messages) reaches the
+            // caller unchanged instead of being wrapped in an ExecutionException.
+            throw e.cause ?: e
+        }
     }
-
-    private val evalLock = Any()
 
     private fun awaitPromise(value: Value): Value {
         if (!value.hasMember("then")) return value
