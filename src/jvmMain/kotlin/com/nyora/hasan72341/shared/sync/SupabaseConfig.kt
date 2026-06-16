@@ -28,19 +28,26 @@ object SupabaseConfig {
 
     fun load(dataDir: Path) {
         val env = readEnvSync()
-        url = System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }
-            ?: env["SUPABASE_URL"]?.takeIf { it.isNotBlank() }
+        // Secrets baked into the packaged artifact at BUILD time (CI writes
+        // /nyora-oauth.properties into the app's resources from an Actions secret;
+        // the file is gitignored and never committed). This is how the desktop
+        // OAuth client secret reaches end-user machines — they have no env var or
+        // .env.sync. Resolution order: env var > dev .env.sync > baked resource.
+        val res = readResourceProps()
+        fun cfg(key: String): String? = System.getenv(key)?.takeIf { it.isNotBlank() }
+            ?: env[key]?.takeIf { it.isNotBlank() }
+            ?: res[key]?.takeIf { it.isNotBlank() }
+
+        url = cfg("SUPABASE_URL")
             ?: readProp(dataDir, "url").takeIf { it.isNotBlank() }
             ?: "https://fqguzcoytnbnjwaddakn.supabase.co"
-        anonKey = System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }
-            ?: env["SUPABASE_ANON_KEY"]?.takeIf { it.isNotBlank() }
+        anonKey = cfg("SUPABASE_ANON_KEY")
             ?: readProp(dataDir, "anon_key").takeIf { it.isNotBlank() }
             ?: "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
 
-        // Prioritize env vars / .env.sync for these too
-        (System.getenv("GOOGLE_DESKTOP_CLIENT_ID") ?: env["GOOGLE_DESKTOP_CLIENT_ID"])?.takeIf { it.isNotBlank() }?.let { googleDesktopClientId = it }
-        (System.getenv("GOOGLE_SERVER_CLIENT_ID") ?: env["GOOGLE_SERVER_CLIENT_ID"])?.takeIf { it.isNotBlank() }?.let { googleServerClientId = it }
-        (System.getenv("GOOGLE_CLIENT_SECRET") ?: env["GOOGLE_CLIENT_SECRET"])?.takeIf { it.isNotBlank() }?.let { googleClientSecret = it }
+        cfg("GOOGLE_DESKTOP_CLIENT_ID")?.let { googleDesktopClientId = it }
+        cfg("GOOGLE_SERVER_CLIENT_ID")?.let { googleServerClientId = it }
+        cfg("GOOGLE_CLIENT_SECRET")?.let { googleClientSecret = it }
 
         val tokenFile = dataDir.resolve("supabase_tokens.properties")
         if (Files.exists(tokenFile)) {
@@ -89,6 +96,20 @@ object SupabaseConfig {
         return Properties()
             .also { it.load(Files.newBufferedReader(file)) }
             .getProperty(key, "")
+    }
+
+    // KEY=VALUE pairs baked into the packaged app at build time. CI writes
+    // /nyora-oauth.properties into the artifact's resources from an Actions
+    // secret (gitignored, never committed), so a distributed app carries the
+    // OAuth client secret without it living in the source tree or git history.
+    private fun readResourceProps(): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        runCatching {
+            SupabaseConfig::class.java.getResourceAsStream("/nyora-oauth.properties")?.use { stream ->
+                Properties().also { it.load(stream) }.forEach { (k, v) -> out[k.toString()] = v.toString() }
+            }
+        }
+        return out
     }
 
     // Reads KEY=VALUE pairs (active, uncommented lines) from the canonical env
