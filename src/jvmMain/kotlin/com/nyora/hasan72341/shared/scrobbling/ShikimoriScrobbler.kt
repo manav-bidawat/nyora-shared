@@ -37,9 +37,11 @@ class ShikimoriScrobbler(
 
 	private var cachedUserId: Long? = null
 
+	override val defaultRedirectUri: String = REDIRECT_URI
+
 	override val oauthUrl: String
 		get() = "${BASE}oauth/authorize?client_id=${service.clientId}" +
-			"&redirect_uri=$REDIRECT_URI&response_type=code&scope="
+			"&redirect_uri=${enc(redirectUri)}&response_type=code&scope="
 
 	private fun builder() = authedBuilder().header("User-Agent", USER_AGENT)
 
@@ -49,7 +51,7 @@ class ShikimoriScrobbler(
 				"client_id" to service.clientId,
 				"client_secret" to service.clientSecret,
 				"grant_type" to "authorization_code",
-				"redirect_uri" to REDIRECT_URI,
+				"redirect_uri" to redirectUri,
 				"code" to code,
 			)
 		} else {

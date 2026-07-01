@@ -43,4 +43,13 @@ class ScrobblerRepository(
 
 	/** The scrobblers the user is currently signed in to. */
 	fun authorized(): List<Scrobbler> = scrobblers.values.filter { it.isAuthorized }
+
+	companion object {
+		/**
+		 * A repository whose tokens persist to disk (TS-011), so desktop tracker
+		 * logins survive an app restart. Backed by [PersistentScrobblerTokenStore].
+		 */
+		fun persistent(http: OkHttpClient = OkHttpClient()): ScrobblerRepository =
+			ScrobblerRepository(http) { PersistentScrobblerTokenStore(it) }
+	}
 }

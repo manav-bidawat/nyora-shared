@@ -38,10 +38,12 @@ class MalScrobbler(
 		Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 	}
 
+	override val defaultRedirectUri: String = REDIRECT_URI
+
 	override val oauthUrl: String
 		get() = "$WEB/v1/oauth2/authorize?response_type=code" +
 			"&client_id=${service.clientId}" +
-			"&redirect_uri=$REDIRECT_URI" +
+			"&redirect_uri=${enc(redirectUri)}" +
 			"&code_challenge=$codeVerifier&code_challenge_method=plain"
 
 	override suspend fun authorize(code: String?): ScrobblerUser {
@@ -50,7 +52,7 @@ class MalScrobbler(
 				"client_id" to service.clientId,
 				"grant_type" to "authorization_code",
 				"code" to code,
-				"redirect_uri" to REDIRECT_URI,
+				"redirect_uri" to redirectUri,
 				"code_verifier" to codeVerifier,
 			)
 		} else {
