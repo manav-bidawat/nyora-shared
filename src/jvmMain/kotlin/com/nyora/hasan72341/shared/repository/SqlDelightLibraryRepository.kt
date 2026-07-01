@@ -597,12 +597,76 @@ class SqlDelightLibraryRepository(
         triggerPush()
     }
 
+    // MARK: - tracking (per-service link + live state, canonical schema)
+
+    override fun allTracking(): List<TrackingRow> {
+        return database.trackingQueries.selectAll().executeAsList().map { it.toTrackingRow() }
+    }
+
+    /** Live (non-tombstoned) tracking links for a given manga. */
+    fun trackingForManga(mangaId: String): List<TrackingRow> {
+        return database.trackingQueries.selectForManga(mangaId).executeAsList().map { it.toTrackingRow() }
+    }
+
+    override fun saveTracking(row: TrackingRow) {
+        database.trackingQueries.upsert(
+            tracker_id = row.trackerId,
+            manga_id = row.mangaId,
+            remote_id = row.remoteId,
+            source_id = row.sourceId,
+            title = row.title,
+            status = row.status,
+            score = row.score.toDouble(),
+            last_read_chapter = row.lastReadChapter.toDouble(),
+            last_read_volume = row.lastReadVolume.toLong(),
+            total_chapters = row.totalChapters.toLong(),
+            total_volumes = row.totalVolumes.toLong(),
+            chapter_offset = row.chapterOffset.toLong(),
+            started_at = row.startedAt,
+            finished_at = row.finishedAt,
+            comment = row.comment,
+            updated_at = row.updatedAt.ifBlank { nowIso() },
+            deleted_at = row.deletedAt,
+        )
+        triggerPush()
+    }
+
+    /** Soft-delete (tombstone) a tracking link so the deletion propagates on the next push. */
+    fun removeTracking(trackerId: String, mangaId: String) {
+        val now = nowIso()
+        database.trackingQueries.softDelete(deleted_at = now, updated_at = now, tracker_id = trackerId, manga_id = mangaId)
+        triggerPush()
+    }
+
+    private fun com.nyora.hasan72341.shared.db.Tracking.toTrackingRow(): TrackingRow = TrackingRow(
+        trackerId = tracker_id,
+        remoteId = remote_id,
+        sourceId = source_id,
+        mangaId = manga_id,
+        title = title,
+        status = status,
+        score = score.toFloat(),
+        lastReadChapter = last_read_chapter.toFloat(),
+        lastReadVolume = last_read_volume.toInt(),
+        totalChapters = total_chapters.toInt(),
+        totalVolumes = total_volumes.toInt(),
+        chapterOffset = chapter_offset.toInt(),
+        startedAt = started_at,
+        finishedAt = finished_at,
+        comment = comment,
+        updatedAt = updated_at,
+        deletedAt = deleted_at,
+    )
+
+    private fun nowIso(): String = OffsetDateTime.now(java.time.ZoneOffset.UTC).toInstant().toString()
+
     override fun hasLocalSyncableData(): Boolean {
         if (database.mangaFavouriteQueries.countAll().executeAsOne() > 0) return true
         if (database.mangaHistoryQueries.countAll().executeAsOne() > 0) return true
         if (database.bookmarkQueries.countAll().executeAsOne() > 0) return true
         if (database.favouriteCategoryQueries.selectAllCategories().executeAsList().isNotEmpty()) return true
         if (database.mangaPrefsQueries.selectAll().executeAsList().isNotEmpty()) return true
+        if (database.trackingQueries.countLive().executeAsOne() > 0) return true
         val sources = database.mangaSourceQueries.selectAll().executeAsList()
         if (sources.any { it.is_pinned != 0L }) return true
         return false
@@ -617,6 +681,7 @@ class SqlDelightLibraryRepository(
             database.favouriteCategoryQueries.deleteAllCategories()
             database.mangaPrefsQueries.deleteAll()
             database.mangaUpdateQueries.deleteAll()
+            database.trackingQueries.deleteAll()
             database.mangaQueries.deleteAll()
         }
     }
