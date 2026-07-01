@@ -116,6 +116,8 @@ object HelperMain {
             pageLoader = PageImageLoader(networkConfig = boot.networkConfig),
             downloads = downloadManager,
             networkConfig = boot.networkConfig,
+            // Pin the port for a stable reverse-proxy upstream when hosted (else ephemeral).
+            port = System.getenv("NYORA_HELPER_PORT")?.toIntOrNull() ?: 0,
         )
 
         val baseUrl = server.start()

@@ -91,6 +91,14 @@ fun buildOkHttpClient(settings: HelperNetworkSettings): OkHttpClient =
         .followRedirects(true)
         .followSslRedirects(true)
         .cookieJar(sharedCookieJar)
+        // Transparently clear Cloudflare "Just a moment" JS challenges via a local
+        // FlareSolverr (127.0.0.1:8191). No-op when FlareSolverr is unreachable.
+        .addInterceptor(CloudflareInterceptor)
+        // Add browser-consistent headers (client hints + fetch metadata) to every
+        // request. Ordered AFTER the CF interceptor so the hints match the final
+        // User-Agent (incl. a FlareSolverr-swapped one) and never override a
+        // parser's own headers.
+        .addInterceptor(BrowserHeadersInterceptor)
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .callTimeout(120, TimeUnit.SECONDS)

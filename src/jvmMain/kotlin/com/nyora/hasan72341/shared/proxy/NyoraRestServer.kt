@@ -100,6 +100,8 @@ class NyoraRestServer(
             createContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
             createContext("/docs") { handleDocs(it) }
             createContext("/openapi.yaml") { handleOpenApiSpec(it) }
+            createContext("/device/relay/poll") { handleDeviceRelayPoll(it) }
+            createContext("/device/relay/result") { handleDeviceRelayResult(it) }
             createContext("/sources/refresh") { handleRefresh(it) }
             createContext("/sources/catalog") { handleCatalog(it) }
             createContext("/sources/install") { handleInstall(it) }
@@ -264,6 +266,53 @@ class NyoraRestServer(
         exchange.responseBody.use { it.write(bytes) }
     }
 
+    // MARK: - Device-as-egress relay (Cloudflare Turnstile)
+
+    /** Device long-poll: block up to 25s for the next fetch task. 200 with a task
+     *  (JSON), or 200 with `{}` when idle (device just polls again). */
+    private fun handleDeviceRelayPoll(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val task = com.nyora.hasan72341.shared.net.DeviceRelay.poll(25_000)
+        if (task == null) {
+            respondJson(exchange, 200, buildJsonObject {})
+            return
+        }
+        respondJson(exchange, 200, buildJsonObject {
+            put("id", task.id)
+            put("url", task.url)
+            put("method", task.method)
+            put("headers", buildJsonObject { task.headers.forEach { (key, value) -> put(key, value) } })
+            task.body?.let { put("bodyB64", java.util.Base64.getEncoder().encodeToString(it)) }
+        })
+    }
+
+    /** Device delivers a completed fetch: {id, status, contentType?, bodyB64}. */
+    private fun handleDeviceRelayResult(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val raw = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+        val obj = try {
+            json.parseToJsonElement(raw).jsonObject
+        } catch (_: Exception) {
+            respondError(exchange, 400, "Invalid JSON"); return
+        }
+        val id = obj["id"]?.jsonPrimitive?.contentOrNull
+            ?: return respondError(exchange, 400, "Missing id")
+        val status = obj["status"]?.jsonPrimitive?.intOrNull ?: 200
+        val contentType = obj["contentType"]?.jsonPrimitive?.contentOrNull
+        val body = obj["bodyB64"]?.jsonPrimitive?.contentOrNull
+            ?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+            ?: ByteArray(0)
+        com.nyora.hasan72341.shared.net.DeviceRelay.complete(
+            id,
+            com.nyora.hasan72341.shared.net.DeviceRelay.Result(status, contentType, body)
+        )
+        respondJson(exchange, 200, buildJsonObject { put("ok", true) })
+    }
+
     private fun applyCors(exchange: HttpExchange) {
         if (!corsEnabled) return
         val headers = exchange.responseHeaders
@@ -315,6 +364,7 @@ class NyoraRestServer(
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
+        ResponseCache.get("catalog")?.let { respondJsonRaw(exchange, 200, it); return }
         val installed = facade.listSources().filter { it.isInstalled }.map { it.id }.toSet()
         val entries = getJsSources().map { source ->
             CatalogEntry(
@@ -327,13 +377,16 @@ class NyoraRestServer(
                 isInstalled = source.id in installed,
             )
         }
-        respondJson(exchange, 200, json.encodeToJsonElement(CatalogResponse(entries)))
+        val body = json.encodeToString(CatalogResponse.serializer(), CatalogResponse(entries))
+        ResponseCache.put("catalog", body, 300_000) // 5 min; invalidated on install/uninstall
+        respondJsonRaw(exchange, 200, body)
     }
 
     private fun handleInstall(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
+        ResponseCache.invalidate("catalog") // installed flags change
         val id = exchange.query()["id"]
         if (id.isNullOrBlank()) {
             respondError(exchange, 400, "Missing 'id'"); return
@@ -384,6 +437,7 @@ class NyoraRestServer(
         ) {
             respondText(exchange, 405, "Method not allowed"); return
         }
+        ResponseCache.invalidate("catalog") // installed flags change
         val id = exchange.query()["id"]
         if (id.isNullOrBlank()) {
             respondError(exchange, 400, "Missing 'id'"); return
@@ -541,6 +595,12 @@ class NyoraRestServer(
         val params = exchange.query()
         val id = params["id"] ?: return respondError(exchange, 400, "Missing 'id'")
         val page = params["page"]?.toIntOrNull() ?: 1
+        // Cache check FIRST — a hit must skip the source lookup below, because
+        // facade.listSources() serializes under concurrency (DB/lock) and would
+        // otherwise bottleneck cached hits. Popular/Latest are identical for every
+        // user; Search is query/user-specific → never cached.
+        val cacheKey = if (mode != BrowseMode.SEARCH) "browse:${mode.name}:$id:$page:${params["f"].orEmpty()}" else null
+        if (cacheKey != null) ResponseCache.get(cacheKey)?.let { respondJsonRaw(exchange, 200, it); return }
         val source = facade.listSources().firstOrNull { it.id == id }
             ?: return respondError(exchange, 404, "Unknown source: $id")
         // Filters are passed as a URL-encoded JSON array in the 'f' parameter:
@@ -555,12 +615,18 @@ class NyoraRestServer(
                     BrowseMode.SEARCH -> service.search(params["q"].orEmpty(), page, filters)
                 }
             }
-            respondJson(exchange, 200, json.encodeToJsonElement(
+            val body = json.encodeToString(
+                BrowseResponse.serializer(),
                 BrowseResponse(
                     entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
                     hasNextPage = result.hasNextPage,
                 ),
-            ))
+            )
+            // only cache successful, non-empty pages (don't cache flukes/empties)
+            if (cacheKey != null && result.entries.isNotEmpty()) {
+                ResponseCache.put(cacheKey, body, 600_000) // 10 min
+            }
+            respondJsonRaw(exchange, 200, body)
         } catch (error: Exception) {
             respondError(exchange, 500, error.message ?: "Browse failed")
         }
@@ -1385,6 +1451,15 @@ class NyoraRestServer(
     private fun respondJson(exchange: HttpExchange, status: Int, body: kotlinx.serialization.json.JsonElement) {
         val bytes = json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), body)
             .toByteArray(StandardCharsets.UTF_8)
+        applyCors(exchange)
+        exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+        exchange.sendResponseHeaders(status, bytes.size.toLong())
+        exchange.responseBody.use { it.write(bytes) }
+    }
+
+    /** Respond with an already-serialized JSON string (used for cached responses). */
+    private fun respondJsonRaw(exchange: HttpExchange, status: Int, body: String) {
+        val bytes = body.toByteArray(StandardCharsets.UTF_8)
         applyCors(exchange)
         exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
         exchange.sendResponseHeaders(status, bytes.size.toLong())
