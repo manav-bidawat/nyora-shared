@@ -32,6 +32,9 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.booleanOrNull
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.URI
@@ -94,6 +97,8 @@ class NyoraRestServer(
         if (server != null) return baseUrl
         val httpServer = HttpServer.create(InetSocketAddress(host, port), 0).apply {
             createContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
+            createContext("/docs") { handleDocs(it) }
+            createContext("/openapi.yaml") { handleOpenApiSpec(it) }
             createContext("/sources/refresh") { handleRefresh(it) }
             createContext("/sources/catalog") { handleCatalog(it) }
             createContext("/sources/install") { handleInstall(it) }
@@ -152,6 +157,7 @@ class NyoraRestServer(
             createContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
             createContext("/supabase/status") { handleSupabaseStatus(it) }
             createContext("/supabase/signin") { handleSupabaseSignIn(it) }
+            createContext("/supabase/register") { handleSupabaseRegister(it) }
             createContext("/supabase/signout") { handleSupabaseSignOut(it) }
             createContext("/supabase/sync") { handleSupabaseSync(it) }
             createContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
@@ -159,7 +165,7 @@ class NyoraRestServer(
             createContext("/ota/check") { handleOtaCheck(it) }
             createContext("/ota/status") { handleOtaStatus(it) }
             createContext("/") { handleRoot(it) }
-            executor = Executors.newCachedThreadPool()
+            executor = newServerExecutor()
             start()
         }
         server = httpServer
@@ -224,6 +230,33 @@ class NyoraRestServer(
         else -> "application/octet-stream"
     }
 
+    /** Serves the embedded OpenAPI 3.1 spec (classpath `openapi.yaml`). */
+    private fun handleOpenApiSpec(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val bytes = javaClass.classLoader.getResourceAsStream("openapi.yaml")?.use { it.readBytes() }
+            ?: return respondText(exchange, 404, "openapi.yaml not bundled")
+        applyCors(exchange)
+        exchange.responseHeaders.add("Content-Type", "application/yaml; charset=utf-8")
+        exchange.responseHeaders.add("Cache-Control", "no-cache")
+        exchange.sendResponseHeaders(200, bytes.size.toLong())
+        exchange.responseBody.use { it.write(bytes) }
+    }
+
+    /** Serves a self-contained Swagger UI page that loads the spec from /openapi.yaml. */
+    private fun handleDocs(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val bytes = SWAGGER_UI_HTML.toByteArray(StandardCharsets.UTF_8)
+        applyCors(exchange)
+        exchange.responseHeaders.add("Content-Type", "text/html; charset=utf-8")
+        exchange.responseHeaders.add("Cache-Control", "no-cache")
+        exchange.sendResponseHeaders(200, bytes.size.toLong())
+        exchange.responseBody.use { it.write(bytes) }
+    }
+
     private fun applyCors(exchange: HttpExchange) {
         if (!corsEnabled) return
         val headers = exchange.responseHeaders
@@ -268,44 +301,8 @@ class NyoraRestServer(
         }
     }
 
-    private fun getJsSources(): List<com.nyora.hasan72341.shared.model.MangaSource> {
-        val otaBase = com.nyora.hasan72341.shared.repository.SqlDelightLibraryRepository
-            .defaultDatabasePath()
-            .parent
-        val jsonText = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.sources(otaBase)
-            ?: javaClass.classLoader.getResourceAsStream("parsers_sources.json")?.bufferedReader()?.readText()
-            ?: return emptyList()
-        val array = kotlinx.serialization.json.Json.parseToJsonElement(jsonText).let {
-            if (it is kotlinx.serialization.json.JsonArray) it else kotlinx.serialization.json.JsonArray(emptyList())
-        }
-        val sources = mutableListOf<com.nyora.hasan72341.shared.model.MangaSource>()
-        for (element in array) {
-            if (element !is kotlinx.serialization.json.JsonObject) continue
-            val idStr = element["id"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: continue
-            val titleStr = element["title"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: idStr
-            val domainStr = element["domain"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: ""
-            val localeStr = element["locale"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: "all"
-            val isNsfw = element["isNsfw"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content?.toBoolean() ?: false
-            
-            sources.add(
-                com.nyora.hasan72341.shared.model.MangaSource(
-                    id = "parser:$idStr",
-                    name = com.nyora.hasan72341.shared.SourcePatches.TITLE_OVERRIDES[idStr] ?: titleStr,
-                    lang = localeStr,
-                    baseUrl = "https://$domainStr",
-                    isInstalled = false,
-                    isNsfw = isNsfw,
-                    engine = com.nyora.hasan72341.shared.model.SourceEngine.JavaScript,
-                    contentType = com.nyora.hasan72341.shared.model.SourceContentType.Manga,
-                    notes = "Built-in JS parser.",
-                    localPath = "classpath:parsers.bundle.js",
-                    canUninstall = false,
-                    installedAt = 0L,
-                )
-            )
-        }
-        return sources
-    }
+    private fun getJsSources(): List<com.nyora.hasan72341.shared.model.MangaSource> =
+        com.nyora.hasan72341.shared.extension.nativeParserCatalog()
 
     private fun handleCatalog(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
@@ -317,7 +314,7 @@ class NyoraRestServer(
                 id = source.id,
                 name = source.name,
                 lang = source.lang,
-                engine = com.nyora.hasan72341.shared.model.SourceEngine.JavaScript.name,
+                engine = source.engine.name,
                 contentType = source.contentType.name,
                 isBroken = false,
                 isInstalled = source.id in installed,
@@ -343,8 +340,8 @@ class NyoraRestServer(
             try {
                 val flipped = existing.copy(
                     isInstalled = true,
-                    engine = com.nyora.hasan72341.shared.model.SourceEngine.JavaScript,
-                    localPath = "classpath:parsers.bundle.js",
+                    engine = com.nyora.hasan72341.shared.model.SourceEngine.Parser,
+                    localPath = "",
                     installedAt = System.currentTimeMillis(),
                 )
                 val installed = facade.installSource(flipped) { it }
@@ -372,7 +369,7 @@ class NyoraRestServer(
 
     private fun isJsParserSource(source: com.nyora.hasan72341.shared.model.MangaSource): Boolean =
         source.id.startsWith("parser:") &&
-            source.engine == com.nyora.hasan72341.shared.model.SourceEngine.JavaScript
+            source.engine == com.nyora.hasan72341.shared.model.SourceEngine.Parser
 
     private fun handleUninstall(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("DELETE", ignoreCase = true) &&
@@ -575,7 +572,7 @@ class NyoraRestServer(
             val service = facade.openExtension(source)
             val details = runBlocking { service.getDetails(url) }
             val manga = details.manga.copy(
-                source = com.nyora.hasan72341.shared.model.MangaSourceRef.Script(source.toAndroidJsSourceName()),
+                source = com.nyora.hasan72341.shared.model.MangaSourceRef.Parser(source.id.removePrefix("parser:")),
                 chapters = details.chapters,
             )
             facade.upsertManga(manga)
@@ -1007,7 +1004,9 @@ class NyoraRestServer(
         // per-source cap), and the Swift client waits as long as it takes.
         // The per-source cap stays: without it a single hung source would block
         // `awaitAll` forever and the whole search would never return.
-        val gate = kotlinx.coroutines.sync.Semaphore(48)
+        // Bounded fan-out — keeps the worst-case memory spike (many in-flight Jsoup
+        // documents at once) small so the hosted helper stays under its RAM budget.
+        val gate = kotlinx.coroutines.sync.Semaphore(12)
         val results = kotlinx.coroutines.runBlocking {
             kotlinx.coroutines.coroutineScope {
                 installed.map { src ->
@@ -1420,11 +1419,30 @@ class NyoraRestServer(
             respondText(exchange, 405, "Method not allowed"); return
         }
         val params = exchange.query()
-        val idToken = params["idToken"]
-        if (idToken.isNullOrBlank()) {
-            return respondError(exchange, 400, "Missing 'idToken'")
+        val email = params["email"]
+        val password = params["password"]
+        if (email.isNullOrBlank() || password.isNullOrBlank()) {
+            return respondError(exchange, 400, "Missing 'email' or 'password'")
         }
-        val error = facade.supabaseSignInWithGoogle(idToken)
+        val error = facade.supabaseSignIn(email, password)
+        if (error == null) {
+            respondJson(exchange, 200, buildJsonObject { put("ok", true) })
+        } else {
+            respondError(exchange, 401, error)
+        }
+    }
+
+    private fun handleSupabaseRegister(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val params = exchange.query()
+        val email = params["email"]
+        val password = params["password"]
+        if (email.isNullOrBlank() || password.isNullOrBlank()) {
+            return respondError(exchange, 400, "Missing 'email' or 'password'")
+        }
+        val error = facade.supabaseRegister(email, password)
         if (error == null) {
             respondJson(exchange, 200, buildJsonObject { put("ok", true) })
         } else {
@@ -1474,20 +1492,16 @@ class NyoraRestServer(
 
     // ----- OTA parser updates -----
 
-    private fun otaBaseDir() =
-        com.nyora.hasan72341.shared.repository.SqlDelightLibraryRepository.defaultDatabasePath().parent
-
+    // Parsers are compiled in natively (kotatsu-parsers-redo); there is no OTA bundle.
+    // These endpoints are kept for client compatibility and report the static state.
     private fun handleOtaStatus(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
         respondJson(exchange, 200, buildJsonObject {
-            val base = otaBaseDir()
-            val otaVer = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.otaVersion(base)
-            val isActive = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.isActive(base)
-            put("bundledVersion", com.nyora.hasan72341.shared.extension.ParserOtaUpdater.BUNDLED_VERSION)
-            put("otaVersion", otaVer)
-            put("isActive", isActive)
+            put("bundledVersion", 0)
+            put("otaVersion", 0)
+            put("isActive", false)
         })
     }
 
@@ -1495,16 +1509,10 @@ class NyoraRestServer(
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        val base = otaBaseDir()
-        runCatching {
-            com.nyora.hasan72341.shared.extension.ParserOtaUpdater.updateOnce(base, networkConfig)
-        }.onFailure { println("[OTA] manual check failed: ${it.message}") }
         respondJson(exchange, 200, buildJsonObject {
-            val otaVer = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.otaVersion(base)
-            val isActive = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.isActive(base)
-            put("bundledVersion", com.nyora.hasan72341.shared.extension.ParserOtaUpdater.BUNDLED_VERSION)
-            put("otaVersion", otaVer)
-            put("isActive", isActive)
+            put("bundledVersion", 0)
+            put("otaVersion", 0)
+            put("isActive", false)
         })
     }
 
@@ -1797,7 +1805,7 @@ class NyoraRestServer(
             respondText(exchange, 405, "Method not allowed"); return
         }
         val payload = buildJsonObject {
-            put("version", 1)
+            put("version", 2)
             put("exportedAt", System.currentTimeMillis())
             put("favourites", kotlinx.serialization.json.JsonArray(
                 facade.favourites().map { mangaToJson(it) }
@@ -1822,6 +1830,20 @@ class NyoraRestServer(
                     buildJsonObject {
                         put("id", cat.id)
                         put("title", cat.title)
+                        put("sortKey", cat.sortKey)
+                        put("createdAt", cat.createdAt)
+                    }
+                }
+            ))
+            // Manga <-> category membership (kept separate so category ids can be
+            // remapped on import without losing which manga belong where).
+            put("mangaCategories", kotlinx.serialization.json.JsonArray(
+                facade.favourites().flatMap { manga ->
+                    facade.categoriesForManga(manga.id).map { cat ->
+                        buildJsonObject {
+                            put("mangaId", manga.id)
+                            put("categoryId", cat.id)
+                        }
                     }
                 }
             ))
@@ -1830,11 +1852,59 @@ class NyoraRestServer(
                     buildJsonObject {
                         put("mangaId", bm.mangaId)
                         put("mangaTitle", bm.mangaTitle)
+                        put("mangaCoverUrl", bm.mangaCoverUrl)
                         put("chapterId", bm.chapterId)
                         put("chapterTitle", bm.chapterTitle)
                         put("page", bm.page)
                         put("note", bm.note)
                         put("createdAt", bm.createdAt)
+                    }
+                }
+            ))
+            put("mangaPrefs", kotlinx.serialization.json.JsonArray(
+                facade.allMangaPrefs().map { p ->
+                    buildJsonObject {
+                        put("mangaId", p.mangaId)
+                        put("readerMode", p.readerMode)
+                        put("brightness", p.brightness)
+                        put("contrast", p.contrast)
+                        put("saturation", p.saturation)
+                        put("hue", p.hue)
+                        put("palette", p.palette)
+                    }
+                }
+            ))
+            put("sourcePrefs", kotlinx.serialization.json.JsonArray(
+                facade.listSources().map { s ->
+                    buildJsonObject {
+                        put("sourceId", s.id)
+                        put("isPinned", s.isPinned)
+                    }
+                }
+            ))
+            // Canonical cross-platform tracking section (snake_case, matching the
+            // server nyora_tracking table + the iOS/Android clients). Empty until the
+            // local tracking store (TS-010) is wired; the loop below then round-trips it.
+            put("tracking", kotlinx.serialization.json.JsonArray(
+                facade.allTracking().map { t ->
+                    buildJsonObject {
+                        put("tracker_id", t.trackerId)
+                        put("remote_id", t.remoteId)
+                        put("source_id", t.sourceId)
+                        put("manga_id", t.mangaId)
+                        put("title", t.title)
+                        put("status", t.status)
+                        put("score", t.score)
+                        put("last_read_chapter", t.lastReadChapter)
+                        put("last_read_volume", t.lastReadVolume)
+                        put("total_chapters", t.totalChapters)
+                        put("total_volumes", t.totalVolumes)
+                        put("chapter_offset", t.chapterOffset)
+                        put("started_at", t.startedAt)
+                        put("finished_at", t.finishedAt)
+                        put("comment", t.comment)
+                        put("updated_at", t.updatedAt)
+                        put("deleted_at", t.deletedAt)
                     }
                 }
             ))
@@ -1857,8 +1927,9 @@ class NyoraRestServer(
         } catch (e: Exception) {
             respondError(exchange, 400, "Invalid JSON: ${e.message}"); return
         }
-        val favs = root["favourites"]?.let { it as? kotlinx.serialization.json.JsonArray } ?: kotlinx.serialization.json.JsonArray(emptyList())
-        val hist = root["history"]?.let { it as? kotlinx.serialization.json.JsonArray } ?: kotlinx.serialization.json.JsonArray(emptyList())
+        fun arr(key: String) = root[key] as? kotlinx.serialization.json.JsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
+        val favs = arr("favourites")
+        val hist = arr("history")
         var importedFavs = 0
         for (el in favs) {
             val o = el.jsonObject
@@ -1889,10 +1960,112 @@ class NyoraRestServer(
             facade.recordHistory(mangaId, sourceId, chapterId, chapterTitle, page, percent)
             importedHist++
         }
+
+        // Categories: match existing by title (idempotent re-import), else create.
+        // Build backup-id -> local-id map so membership can be reattached below.
+        val catIdMap = HashMap<Long, Long>()
+        var importedCats = 0
+        for (el in arr("categories")) {
+            val o = el.jsonObject
+            val backupId = o["id"]?.jsonPrimitive?.longOrNull ?: continue
+            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: continue
+            val existing = facade.favouriteCategories().firstOrNull { it.title == title }
+            val localId = existing?.id ?: facade.createCategory(title)
+            if (localId >= 0L) {
+                catIdMap[backupId] = localId
+                if (existing == null) importedCats++
+            }
+        }
+        var importedMangaCats = 0
+        for (el in arr("mangaCategories")) {
+            val o = el.jsonObject
+            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
+            val backupCatId = o["categoryId"]?.jsonPrimitive?.longOrNull ?: continue
+            val localCatId = catIdMap[backupCatId] ?: continue
+            facade.addToCategory(mangaId, localCatId)
+            importedMangaCats++
+        }
+
+        var importedBookmarks = 0
+        for (el in arr("bookmarks")) {
+            val o = el.jsonObject
+            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
+            val chapterId = o["chapterId"]?.jsonPrimitive?.contentOrNull ?: continue
+            val chapterTitle = o["chapterTitle"]?.jsonPrimitive?.contentOrNull ?: ""
+            val page = o["page"]?.jsonPrimitive?.intOrNull ?: 0
+            val note = o["note"]?.jsonPrimitive?.contentOrNull ?: ""
+            if (facade.isPageBookmarked(mangaId, chapterId, page)) continue
+            facade.addBookmark(mangaId, chapterId, chapterTitle, page, note)
+            importedBookmarks++
+        }
+
+        var importedMangaPrefs = 0
+        for (el in arr("mangaPrefs")) {
+            val o = el.jsonObject
+            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
+            facade.saveMangaPrefs(com.nyora.hasan72341.shared.repository.MangaPrefsRow(
+                mangaId = mangaId,
+                readerMode = o["readerMode"]?.jsonPrimitive?.contentOrNull ?: "",
+                brightness = o["brightness"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                contrast = o["contrast"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                saturation = o["saturation"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                hue = o["hue"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
+                palette = o["palette"]?.jsonPrimitive?.contentOrNull ?: "",
+            ))
+            importedMangaPrefs++
+        }
+
+        // Source pin state: only toggle when it differs from the current state.
+        var importedSourcePrefs = 0
+        val sources = facade.listSources()
+        for (el in arr("sourcePrefs")) {
+            val o = el.jsonObject
+            val sourceId = o["sourceId"]?.jsonPrimitive?.contentOrNull ?: continue
+            val wantPinned = o["isPinned"]?.jsonPrimitive?.booleanOrNull ?: continue
+            val src = sources.firstOrNull { it.id == sourceId } ?: continue
+            if (src.isPinned != wantPinned) {
+                facade.togglePin(sourceId)
+                importedSourcePrefs++
+            }
+        }
+
+        var importedTracking = 0
+        for (el in arr("tracking")) {
+            val o = el.jsonObject
+            val trackerId = o["tracker_id"]?.jsonPrimitive?.contentOrNull ?: continue
+            val mangaId = o["manga_id"]?.jsonPrimitive?.contentOrNull ?: continue
+            facade.saveTracking(com.nyora.hasan72341.shared.repository.TrackingRow(
+                trackerId = trackerId,
+                remoteId = o["remote_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                sourceId = o["source_id"]?.jsonPrimitive?.contentOrNull ?: "",
+                mangaId = mangaId,
+                title = o["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                status = o["status"]?.jsonPrimitive?.contentOrNull ?: "",
+                score = o["score"]?.jsonPrimitive?.floatOrNull ?: 0f,
+                lastReadChapter = o["last_read_chapter"]?.jsonPrimitive?.floatOrNull ?: 0f,
+                lastReadVolume = o["last_read_volume"]?.jsonPrimitive?.intOrNull ?: 0,
+                totalChapters = o["total_chapters"]?.jsonPrimitive?.intOrNull ?: 0,
+                totalVolumes = o["total_volumes"]?.jsonPrimitive?.intOrNull ?: 0,
+                chapterOffset = o["chapter_offset"]?.jsonPrimitive?.intOrNull ?: 0,
+                startedAt = o["started_at"]?.jsonPrimitive?.contentOrNull ?: "",
+                finishedAt = o["finished_at"]?.jsonPrimitive?.contentOrNull ?: "",
+                comment = o["comment"]?.jsonPrimitive?.contentOrNull ?: "",
+                updatedAt = o["updated_at"]?.jsonPrimitive?.contentOrNull ?: "",
+                deletedAt = o["deleted_at"]?.jsonPrimitive?.contentOrNull ?: "",
+            ))
+            importedTracking++
+        }
+
         respondJson(exchange, 200, buildJsonObject {
             put("ok", true)
             put("importedFavourites", importedFavs)
             put("importedHistory", importedHist)
+            put("importedCategories", importedCats)
+            put("importedMangaCategories", importedMangaCats)
+            put("importedBookmarks", importedBookmarks)
+            put("importedMangaPrefs", importedMangaPrefs)
+            put("importedSourcePrefs", importedSourcePrefs)
+            put("importedTracking", importedTracking)
         })
     }
 
@@ -1916,10 +2089,75 @@ class NyoraRestServer(
     }
 }
 
+/** Self-contained Swagger UI page (CDN assets) that loads the spec from same-origin /openapi.yaml. */
+private val SWAGGER_UI_HTML: String = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nyora Parser API — Reference</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+  <style>
+    body { margin: 0; background: #0f1115; }
+    .nyora-topbar { display:flex; align-items:center; gap:14px; padding:14px 22px;
+      background:#15181f; border-bottom:1px solid #262b36;
+      font:600 16px/1.2 -apple-system,system-ui,Segoe UI,Roboto,sans-serif; color:#e8eaed; }
+    .nyora-topbar .dot { width:10px; height:10px; border-radius:50%; background:#6ea8fe; }
+    .nyora-topbar .spacer { flex:1; }
+    .nyora-topbar a { font-size:13px; font-weight:500; color:#9bb7ff; text-decoration:none;
+      padding:6px 10px; border:1px solid #2c3344; border-radius:8px; }
+    .nyora-topbar a:hover { background:#1c212c; }
+    .swagger-ui .topbar { display:none; }
+  </style>
+</head>
+<body>
+  <div class="nyora-topbar">
+    <span class="dot"></span><span>Nyora Parser API</span>
+    <span class="spacer"></span><a href="/openapi.yaml" download>openapi.yaml</a>
+  </div>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js" crossorigin></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: "/openapi.yaml",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      docExpansion: "list",
+      defaultModelsExpandDepth: 1,
+      defaultModelExpandDepth: 3,
+      tryItOutEnabled: true,
+      filter: true,
+      displayRequestDuration: true,
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout"
+    });
+  </script>
+</body>
+</html>
+""".trimIndent()
+
+/**
+ * HTTP server executor. On JDK 21+ this is a virtual-thread-per-task executor (Project
+ * Loom): each request runs on its own cheap virtual thread, so thousands of concurrent,
+ * I/O-bound parser requests cost ~tens of MB instead of one OS-thread stack each — the
+ * key to serving ~1k users in a tight RAM budget. Falls back to a bounded pool pre-21.
+ */
+private fun newServerExecutor(): java.util.concurrent.Executor =
+    runCatching {
+        java.util.concurrent.Executors::class.java
+            .getMethod("newVirtualThreadPerTaskExecutor")
+            .invoke(null) as java.util.concurrent.Executor
+    }.getOrElse {
+        java.util.concurrent.Executors.newFixedThreadPool(200)
+    }
+
 private fun com.nyora.hasan72341.shared.model.MangaSource.toAndroidJsSourceName(): String {
     val parserId = id.removePrefix("parser:")
     return if (parserId == id) name else "JS_$parserId"
 }
+
 
 private fun com.nyora.hasan72341.shared.model.MangaSourceRef.Script.toOpenableSourceId(): String {
     val parserId = name.removePrefix("JS_")

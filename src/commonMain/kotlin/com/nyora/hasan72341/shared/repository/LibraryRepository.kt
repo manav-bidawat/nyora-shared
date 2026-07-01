@@ -85,7 +85,15 @@ interface LibraryRepository {
     fun markUpdatesSeen(mangaId: String) {}
     fun markAllUpdatesSeen() {}
 
-    fun supabaseSignInWithGoogle(idToken: String): String? = "Supabase sync unavailable"
+    // Per-service tracking links + live state (canonical cross-platform schema).
+    // Backed by the local tracking store (TS-010); the defaults are empty/no-op so
+    // backup export/import round-trips a tracking section losslessly the moment that
+    // store exists, without any change to the backup handlers.
+    fun allTracking(): List<TrackingRow> = emptyList()
+    fun saveTracking(row: TrackingRow) {}
+
+    fun supabaseSignIn(email: String, password: String): String? = "Sync unavailable"
+    fun supabaseRegister(email: String, password: String): String? = "Sync unavailable"
     fun supabaseSyncNow() {}
     fun supabaseRestoreFromCloud() {}
     fun hasLocalSyncableData(): Boolean = false
@@ -120,6 +128,30 @@ data class FavouriteCategoryRow(
     val sortKey: Int,
     val createdAt: Long,
     val mangaCount: Int,
+)
+
+/**
+ * A per-service tracking record in the canonical cross-platform schema
+ * (matches the server `nyora_tracking` table and the iOS/Android clients).
+ */
+data class TrackingRow(
+    val trackerId: String,
+    val remoteId: String,
+    val sourceId: String,
+    val mangaId: String,
+    val title: String,
+    val status: String,           // canonical: reading/planning/completed/paused/dropped/rereading
+    val score: Float,
+    val lastReadChapter: Float,
+    val lastReadVolume: Int,
+    val totalChapters: Int,
+    val totalVolumes: Int,
+    val chapterOffset: Int,
+    val startedAt: String,        // ISO-8601, empty = unset
+    val finishedAt: String,       // ISO-8601, empty = unset
+    val comment: String,
+    val updatedAt: String,        // ISO-8601 (LWW clock)
+    val deletedAt: String,        // ISO-8601, empty = live (soft-delete tombstone)
 )
 
 data class MangaPrefsRow(
