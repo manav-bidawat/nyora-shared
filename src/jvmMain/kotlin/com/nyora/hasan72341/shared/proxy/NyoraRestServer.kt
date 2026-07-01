@@ -27,6 +27,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -155,6 +156,12 @@ class NyoraRestServer(
             createContext("/backup/import") { handleBackupImport(it) }
             createContext("/tracker/anilist/search") { handleAniListSearch(it) }
             createContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
+            createContext("/tracker/myanimelist/search") { handleMalSearch(it) }
+            createContext("/tracker/myanimelist/scrobble") { handleMalScrobble(it) }
+            createContext("/tracker/kitsu/search") { handleKitsuSearch(it) }
+            createContext("/tracker/kitsu/scrobble") { handleKitsuScrobble(it) }
+            createContext("/tracker/shikimori/search") { handleShikimoriSearch(it) }
+            createContext("/tracker/shikimori/scrobble") { handleShikimoriScrobble(it) }
             createContext("/supabase/status") { handleSupabaseStatus(it) }
             createContext("/supabase/signin") { handleSupabaseSignIn(it) }
             createContext("/supabase/register") { handleSupabaseRegister(it) }
@@ -1588,6 +1595,240 @@ class NyoraRestServer(
         }
         val raw = postJson("https://graphql.anilist.co", body, bearer = token)
             ?: return respondError(exchange, 502, "AniList request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    // ----- Tracker: MyAnimeList / Kitsu / Shikimori -----
+    //
+    // Like AniList above, these are thin bearer-token passthroughs: the desktop
+    // app holds the OAuth access token (Keychain-backed in Swift) and sends it
+    // in the Authorization header on every call, so no credentials are persisted
+    // helper-side. Each handler forwards a single request to the upstream service
+    // API and streams the raw JSON straight back; the UI parses on the client.
+
+    private fun bearerOrNull(exchange: HttpExchange): String? =
+        exchange.requestHeaders.getFirst("Authorization")
+            ?.removePrefix("Bearer ")?.trim()?.takeIf { it.isNotBlank() }
+
+    /// Perform an outbound request to a tracker API and pass the raw body back.
+    /// Handles GET/POST/PUT/PATCH; PATCH (unsupported by HttpURLConnection) is
+    /// tunnelled through POST + X-HTTP-Method-Override, which both Kitsu and
+    /// Shikimori honour. Returns null on transport failure.
+    private fun serviceRequest(
+        url: String,
+        method: String,
+        bearer: String?,
+        body: ByteArray? = null,
+        contentType: String? = null,
+        accept: String? = "application/json",
+        userAgent: String? = null,
+    ): String? {
+        return try {
+            val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                try {
+                    requestMethod = method
+                } catch (_: java.net.ProtocolException) {
+                    // HttpURLConnection rejects PATCH; tunnel it via POST override.
+                    requestMethod = "POST"
+                    setRequestProperty("X-HTTP-Method-Override", method)
+                }
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                instanceFollowRedirects = true
+                if (accept != null) setRequestProperty("Accept", accept)
+                if (userAgent != null) setRequestProperty("User-Agent", userAgent)
+                if (bearer != null) setRequestProperty("Authorization", "Bearer $bearer")
+                if (body != null) {
+                    doOutput = true
+                    if (contentType != null) setRequestProperty("Content-Type", contentType)
+                }
+            }
+            if (body != null) conn.outputStream.use { it.write(body) }
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun urlEncode(value: String): String =
+        java.net.URLEncoder.encode(value, StandardCharsets.UTF_8)
+
+    // --- MyAnimeList (REST v2) ---
+
+    private fun handleMalSearch(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing MyAnimeList token")
+        val title = exchange.query()["title"]?.takeIf { it.isNotBlank() }
+            ?: return respondError(exchange, 400, "Missing 'title'")
+        // MAL 400s on q longer than 64 chars.
+        val url = "https://api.myanimelist.net/v2/manga?q=${urlEncode(title.take(64))}" +
+            "&limit=5&nsfw=true&fields=id,title,main_picture,synopsis"
+        val raw = serviceRequest(url, "GET", token)
+            ?: return respondError(exchange, 502, "MyAnimeList request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    private fun handleMalScrobble(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing MyAnimeList token")
+        val params = exchange.query()
+        val mediaId = params["mediaId"]?.toLongOrNull()
+            ?: return respondError(exchange, 400, "Missing 'mediaId'")
+        // Build the my_list_status form body from whatever the client supplies.
+        val form = buildList {
+            params["progress"]?.toIntOrNull()?.let { add("num_chapters_read=$it") }
+            params["status"]?.takeIf { it.isNotBlank() }?.let { add("status=${urlEncode(it)}") }
+            params["score"]?.toIntOrNull()?.let { add("score=${it.coerceIn(0, 10)}") }
+            params["comment"]?.let { add("comments=${urlEncode(it)}") }
+        }.joinToString("&")
+        val raw = serviceRequest(
+            url = "https://api.myanimelist.net/v2/manga/$mediaId/my_list_status",
+            method = "PUT",
+            bearer = token,
+            body = form.toByteArray(StandardCharsets.UTF_8),
+            contentType = "application/x-www-form-urlencoded",
+        ) ?: return respondError(exchange, 502, "MyAnimeList request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    // --- Kitsu (JSON:API) ---
+
+    private fun handleKitsuSearch(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing Kitsu token")
+        val title = exchange.query()["title"]?.takeIf { it.isNotBlank() }
+            ?: return respondError(exchange, 400, "Missing 'title'")
+        val url = "https://kitsu.app/api/edge/manga?page[limit]=5&filter[text]=${urlEncode(title)}"
+        val raw = serviceRequest(url, "GET", token, accept = "application/vnd.api+json")
+            ?: return respondError(exchange, 502, "Kitsu request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    private fun handleKitsuScrobble(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing Kitsu token")
+        val params = exchange.query()
+        // rateId present -> PATCH an existing library-entry; else POST create
+        // (needs mediaId + userId, which the client resolves via /users?self).
+        val rateId = params["rateId"]?.takeIf { it.isNotBlank() }
+        val attrs = buildJsonObject {
+            params["progress"]?.toIntOrNull()?.let { put("progress", it) }
+            params["status"]?.takeIf { it.isNotBlank() }?.let { put("status", it) }
+            params["ratingTwenty"]?.toIntOrNull()?.let { put("ratingTwenty", it.coerceIn(2, 20)) }
+            params["comment"]?.let { put("notes", it) }
+        }
+        val (url, method, payload) = if (rateId != null) {
+            val body = buildJsonObject {
+                putJsonObject("data") {
+                    put("type", "libraryEntries")
+                    put("id", rateId)
+                    put("attributes", attrs)
+                }
+            }
+            Triple("https://kitsu.app/api/edge/library-entries/$rateId", "PATCH", body)
+        } else {
+            val mediaId = params["mediaId"]?.takeIf { it.isNotBlank() }
+                ?: return respondError(exchange, 400, "Missing 'mediaId' or 'rateId'")
+            val userId = params["userId"]?.takeIf { it.isNotBlank() }
+                ?: return respondError(exchange, 400, "Missing 'userId' for create")
+            val body = buildJsonObject {
+                putJsonObject("data") {
+                    put("type", "libraryEntries")
+                    put("attributes", attrs)
+                    putJsonObject("relationships") {
+                        putJsonObject("manga") {
+                            putJsonObject("data") { put("type", "manga"); put("id", mediaId) }
+                        }
+                        putJsonObject("user") {
+                            putJsonObject("data") { put("type", "users"); put("id", userId) }
+                        }
+                    }
+                }
+            }
+            Triple("https://kitsu.app/api/edge/library-entries", "POST", body)
+        }
+        val raw = serviceRequest(
+            url = url,
+            method = method,
+            bearer = token,
+            body = json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), payload)
+                .toByteArray(StandardCharsets.UTF_8),
+            contentType = "application/vnd.api+json",
+            accept = "application/vnd.api+json",
+        ) ?: return respondError(exchange, 502, "Kitsu request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    // --- Shikimori (REST v2) ---
+
+    private fun handleShikimoriSearch(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing Shikimori token")
+        val title = exchange.query()["title"]?.takeIf { it.isNotBlank() }
+            ?: return respondError(exchange, 400, "Missing 'title'")
+        val url = "https://shikimori.one/api/mangas?limit=10&censored=false&search=${urlEncode(title)}"
+        val raw = serviceRequest(url, "GET", token, userAgent = "Nyora")
+            ?: return respondError(exchange, 502, "Shikimori request failed")
+        respondText(exchange, 200, raw)
+        exchange.responseHeaders.set("Content-Type", "application/json")
+    }
+
+    private fun handleShikimoriScrobble(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing Shikimori token")
+        val params = exchange.query()
+        // rateId present -> PATCH the user_rate; else POST create (needs mediaId + userId).
+        val rateId = params["rateId"]?.takeIf { it.isNotBlank() }
+        val payload = buildJsonObject {
+            putJsonObject("user_rate") {
+                if (rateId == null) {
+                    params["mediaId"]?.toLongOrNull()?.let { put("target_id", it) }
+                    put("target_type", "Manga")
+                    params["userId"]?.toLongOrNull()?.let { put("user_id", it) }
+                }
+                params["progress"]?.toIntOrNull()?.let { put("chapters", it) }
+                params["status"]?.takeIf { it.isNotBlank() }?.let { put("status", it) }
+                params["score"]?.toIntOrNull()?.let { put("score", it.coerceIn(0, 10)) }
+                params["comment"]?.let { put("text", it) }
+            }
+        }
+        if (rateId == null &&
+            (params["mediaId"]?.toLongOrNull() == null || params["userId"]?.toLongOrNull() == null)
+        ) {
+            return respondError(exchange, 400, "Missing 'rateId' or ('mediaId' and 'userId')")
+        }
+        val url = if (rateId != null) {
+            "https://shikimori.one/api/v2/user_rates/$rateId"
+        } else {
+            "https://shikimori.one/api/v2/user_rates"
+        }
+        val raw = serviceRequest(
+            url = url,
+            method = if (rateId != null) "PATCH" else "POST",
+            bearer = token,
+            body = json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), payload)
+                .toByteArray(StandardCharsets.UTF_8),
+            contentType = "application/json",
+            userAgent = "Nyora",
+        ) ?: return respondError(exchange, 502, "Shikimori request failed")
         respondText(exchange, 200, raw)
         exchange.responseHeaders.set("Content-Type", "application/json")
     }
