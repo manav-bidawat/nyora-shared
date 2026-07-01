@@ -80,8 +80,12 @@ class NyoraFacade(
         repository.cachePages(chapterUrl, mangaId, pages)
 
     fun mangaPrefs(mangaId: String) = repository.mangaPrefs(mangaId)
+    fun allMangaPrefs() = repository.allMangaPrefs()
     fun saveMangaPrefs(prefs: com.nyora.hasan72341.shared.repository.MangaPrefsRow) = repository.saveMangaPrefs(prefs)
     fun clearMangaPrefs(mangaId: String) = repository.clearMangaPrefs(mangaId)
+
+    fun allTracking() = repository.allTracking()
+    fun saveTracking(row: com.nyora.hasan72341.shared.repository.TrackingRow) = repository.saveTracking(row)
 
     fun favouriteCategories() = repository.favouriteCategories()
     fun favouritesIn(categoryId: Long) = repository.favouritesIn(categoryId)
@@ -100,7 +104,8 @@ class NyoraFacade(
 
     // ── Supabase Sync ──────────────────────────────────────────────────────
 
-    fun supabaseSignInWithGoogle(idToken: String): String? = repository.supabaseSignInWithGoogle(idToken)
+    fun supabaseSignIn(email: String, password: String): String? = repository.supabaseSignIn(email, password)
+    fun supabaseRegister(email: String, password: String): String? = repository.supabaseRegister(email, password)
 
     fun supabaseSyncNow() = repository.supabaseSyncNow()
 
