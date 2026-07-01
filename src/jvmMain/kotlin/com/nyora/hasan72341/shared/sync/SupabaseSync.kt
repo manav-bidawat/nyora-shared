@@ -152,6 +152,7 @@ class SupabaseSync(
         pushMangaCategories()
         pushUpdates(cutoff)
         pushSourcePrefs()
+        pushTracking(cutoff)
     }
 
     private fun pushFavourites(cutoff: Long) {
@@ -325,6 +326,48 @@ class SupabaseSync(
         upsert("nyora_source_prefs", rows)
     }
 
+    /** Parse an ISO-8601 timestamp to epoch millis; blank/unparseable → 0. */
+    private fun isoToMillis(iso: String?): Long {
+        if (iso.isNullOrBlank()) return 0L
+        return runCatching { Instant.parse(iso).toEpochMilli() }.getOrDefault(0L)
+    }
+
+    private fun pushTracking(cutoff: Long) {
+        // allTracking() includes tombstoned rows so soft-deletes propagate.
+        val tracking = repo.allTracking()
+        if (tracking.isEmpty()) return
+        val uid = SupabaseConfig.userId
+        val now = Instant.now().toString()
+        val rows = mutableListOf<SbTracking>()
+        for (t in tracking) {
+            val updatedMillis = isoToMillis(t.updatedAt)
+            val deletedMillis = isoToMillis(t.deletedAt)
+            if (updatedMillis <= cutoff && deletedMillis <= cutoff) continue
+            rows += SbTracking(
+                user_id = uid,
+                tracker_id = t.trackerId,
+                manga_id = t.mangaId,
+                remote_id = t.remoteId,
+                source_id = t.sourceId.toWireSourceId(),
+                title = t.title,
+                status = t.status,
+                score = t.score.toDouble(),
+                last_read_chapter = t.lastReadChapter.toDouble(),
+                last_read_volume = t.lastReadVolume,
+                total_chapters = t.totalChapters,
+                total_volumes = t.totalVolumes,
+                chapter_offset = t.chapterOffset,
+                started_at = t.startedAt,
+                finished_at = t.finishedAt,
+                comment = t.comment,
+                updated_at = t.updatedAt.ifBlank { now },
+                deleted_at = t.deletedAt.ifBlank { null },
+            )
+        }
+        if (rows.isEmpty()) return
+        upsert("nyora_tracking", rows)
+    }
+
     // ── Pull ────────────────────────────────────────────────────────────────
 
     /** Pull all library tables from Supabase and apply locally. */
@@ -344,6 +387,7 @@ class SupabaseSync(
         pullMangaPrefs(cutoff)
         pullUpdates(cutoff)
         pullSourcePrefs(cutoff)
+        pullTracking(cutoff)
         SupabaseConfig.lastSyncTimestamp = Instant.now().toString()
         SupabaseConfig.saveTokens(dataDir)
         debug(
@@ -515,6 +559,44 @@ class SupabaseSync(
                 }
             }
         }.onFailure { System.err.println("[SupabaseSync] pullSourcePrefs failed: ${it.message}") }.getOrThrow()
+    }
+
+    private fun pullTracking(cutoff: String) {
+        val text = fetch("nyora_tracking", cutoff)
+        runCatching {
+            // LWW guard: skip rows the local store has a newer copy of.
+            val local = repo.allTracking().associateBy { "${it.trackerId}|${it.mangaId}" }
+            json.decodeFromString<List<SbTracking>>(text).forEach { row ->
+                val key = "${row.tracker_id}|${row.manga_id}"
+                val localUpdated = isoToMillis(local[key]?.updatedAt)
+                if (localUpdated > isoToMillis(row.updated_at)) return@forEach
+                if (!row.deleted_at.isNullOrBlank()) {
+                    repo.removeTracking(row.tracker_id, row.manga_id)
+                } else {
+                    repo.saveTracking(
+                        com.nyora.hasan72341.shared.repository.TrackingRow(
+                            trackerId = row.tracker_id,
+                            remoteId = row.remote_id,
+                            sourceId = row.source_id.fromWireSourceId(),
+                            mangaId = row.manga_id,
+                            title = row.title,
+                            status = row.status,
+                            score = row.score.toFloat(),
+                            lastReadChapter = row.last_read_chapter.toFloat(),
+                            lastReadVolume = row.last_read_volume,
+                            totalChapters = row.total_chapters,
+                            totalVolumes = row.total_volumes,
+                            chapterOffset = row.chapter_offset,
+                            startedAt = row.started_at,
+                            finishedAt = row.finished_at,
+                            comment = row.comment,
+                            updatedAt = row.updated_at ?: "",
+                            deletedAt = "",
+                        )
+                    )
+                }
+            }
+        }.onFailure { System.err.println("[SupabaseSync] pullTracking failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullMangaCategories(cutoff: String) {
@@ -750,6 +832,27 @@ class SupabaseSync(
         val is_pinned: Boolean,
         val is_enabled: Boolean,
         val updated_at: String? = null,
+    )
+
+    @Serializable private data class SbTracking(
+        val user_id: String = "",
+        val tracker_id: String,
+        val manga_id: String,
+        val remote_id: String = "",
+        val source_id: String = "",
+        val title: String = "",
+        val status: String = "",
+        val score: Double = 0.0,
+        val last_read_chapter: Double = 0.0,
+        val last_read_volume: Int = 0,
+        val total_chapters: Int = 0,
+        val total_volumes: Int = 0,
+        val chapter_offset: Int = 0,
+        val started_at: String = "",
+        val finished_at: String = "",
+        val comment: String = "",
+        val updated_at: String? = null,
+        val deleted_at: String? = null,
     )
 
     @Serializable private data class SbMangaPrefs(
