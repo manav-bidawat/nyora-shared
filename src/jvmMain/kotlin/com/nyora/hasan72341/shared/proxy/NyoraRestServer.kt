@@ -77,9 +77,11 @@ class NyoraRestServer(
     // returning JSON. Serving the UI from the same origin as the API is what
     // lets a normal browser talk to the parser without tripping CORS.
     private val staticRoot: String? = null,
-    // Emit permissive CORS headers on responses. Harmless for the same-origin
-    // web UI; useful if the API is ever consumed cross-origin.
-    private val corsEnabled: Boolean = staticRoot != null,
+    // Emit permissive CORS headers on responses. Always on: the hosted API
+    // (api.hasanraza.tech) is consumed cross-origin by the web app (and third
+    // parties); harmless for the same-origin desktop/localhost helper. Set
+    // NYORA_CORS=0 to disable.
+    private val corsEnabled: Boolean = System.getenv("NYORA_CORS") != "0",
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -322,6 +324,17 @@ class NyoraRestServer(
         headers.add("Access-Control-Allow-Headers", "Content-Type")
     }
 
+    /** If this is a CORS preflight (OPTIONS), answer it 204 with CORS headers and
+     *  return true so the caller stops. Non-simple requests (POST + JSON body)
+     *  preflight, so POST handlers must call this before their method check. */
+    private fun maybePreflight(exchange: HttpExchange): Boolean {
+        if (!exchange.requestMethod.equals("OPTIONS", ignoreCase = true)) return false
+        applyCors(exchange)
+        exchange.sendResponseHeaders(204, -1)
+        exchange.close()
+        return true
+    }
+
     private fun handleSources(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
@@ -383,6 +396,7 @@ class NyoraRestServer(
     }
 
     private fun handleInstall(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
@@ -432,6 +446,7 @@ class NyoraRestServer(
             source.engine == com.nyora.hasan72341.shared.model.SourceEngine.Parser
 
     private fun handleUninstall(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
         if (!exchange.requestMethod.equals("DELETE", ignoreCase = true) &&
             !exchange.requestMethod.equals("POST", ignoreCase = true)
         ) {
