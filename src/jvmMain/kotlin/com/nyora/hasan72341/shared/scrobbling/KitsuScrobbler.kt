@@ -34,8 +34,10 @@ class KitsuScrobbler(
 
 	private var cachedUserId: Long? = null
 
-	// Kitsu uses a password grant; the desktop UI collects username+password.
-	override val oauthUrl: String = "nyora+kitsu://auth"
+	// Kitsu uses a resource-owner password grant (no browser redirect); the
+	// desktop UI collects username+password and calls ScrobblerOAuth.loginWithPassword.
+	override val defaultRedirectUri: String = "nyora+kitsu://auth"
+	override val oauthUrl: String = defaultRedirectUri
 
 	override suspend fun authorize(code: String?): ScrobblerUser {
 		val body = if (code != null) {

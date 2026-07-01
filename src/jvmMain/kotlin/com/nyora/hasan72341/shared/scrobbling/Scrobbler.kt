@@ -48,6 +48,29 @@ abstract class Scrobbler(
 	/** The URL to open in a browser to start the OAuth authorization flow. */
 	abstract val oauthUrl: String
 
+	/**
+	 * The service's built-in `nyora://…` deep-link redirect. Used unless the
+	 * desktop loopback login flow ([ScrobblerOAuth.login]) overrides
+	 * [redirectUri] first.
+	 */
+	protected abstract val defaultRedirectUri: String
+
+	private var redirectOverride: String? = null
+
+	/**
+	 * The effective OAuth `redirect_uri`. Defaults to [defaultRedirectUri]
+	 * (a `nyora://` deep link); [ScrobblerOAuth.login] sets this to a
+	 * `http://127.0.0.1:<port>/callback` loopback address before building
+	 * [oauthUrl] and exchanging the code, so both halves of the flow agree.
+	 *
+	 * NOTE: a loopback (or `nyora://`) redirect must be registered with the
+	 * service's OAuth application (AniList / MAL / Shikimori) or the authorize
+	 * step is rejected — see [ScrobblerOAuth].
+	 */
+	var redirectUri: String
+		get() = redirectOverride ?: defaultRedirectUri
+		set(value) { redirectOverride = value }
+
 	val isAuthorized: Boolean
 		get() = !tokens.accessToken.isNullOrEmpty()
 
@@ -132,6 +155,9 @@ abstract class Scrobbler(
 		val mt = "$contentType; charset=utf-8".toMediaType()
 		return json.encodeToString(JsonElement.serializer(), element).toRequestBody(mt)
 	}
+
+	/** URL-encode a value for safe use as a query parameter (loopback redirects contain `://` and `:`). */
+	protected fun enc(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
 
 	// ── JSON navigation shorthands ─────────────────────────────────────────────
 

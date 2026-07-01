@@ -32,9 +32,11 @@ class AniListScrobbler(
 		statuses[ScrobblingStatus.DROPPED] = "DROPPED"
 	}
 
+	override val defaultRedirectUri: String = REDIRECT_URI
+
 	override val oauthUrl: String
 		get() = "${OAUTH_BASE}oauth/authorize?client_id=${service.clientId}" +
-			"&redirect_uri=$REDIRECT_URI&response_type=code"
+			"&redirect_uri=${enc(redirectUri)}&response_type=code"
 
 	override suspend fun authorize(code: String?): ScrobblerUser {
 		val body = if (code != null) {
@@ -42,7 +44,7 @@ class AniListScrobbler(
 				"client_id" to service.clientId,
 				"client_secret" to service.clientSecret,
 				"grant_type" to "authorization_code",
-				"redirect_uri" to REDIRECT_URI,
+				"redirect_uri" to redirectUri,
 				"code" to code,
 			)
 		} else {
