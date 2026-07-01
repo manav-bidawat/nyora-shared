@@ -148,8 +148,8 @@ fun rewriteRemoteUrl(url: String, settings: HelperNetworkSettings, kind: RemoteU
  * Canonical browser User-Agent for ALL outbound helper requests.
  *
  * Cloudflare binds a solved `cf_clearance` cookie to the exact User-Agent (and IP)
- * that solved it. The WebView solver ([MacCloudflareSolver.userAgent] in Swift) and
- * the JS parser fetch path ([JavaScriptExtensionService.BROWSER_UA]) both send this
+ * that solved it. The WebView solver (MacCloudflareSolver.userAgent in Swift) and
+ * the native parser fetch path (KotatsuLoaderContext.getDefaultUserAgent) both send this
  * Chrome string, so every request that may carry a cf_clearance cookie — page images
  * and covers via [fetchBytes], catalog HTML via [fetchText] — MUST send it too.
  * Using a different UA here (the old "Nyora/1.0" identifier) made Cloudflare reject

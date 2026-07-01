@@ -621,15 +621,19 @@ class SqlDelightLibraryRepository(
         }
     }
 
-    override fun supabaseSignInWithGoogle(idToken: String): String? {
-        val sync = supabaseSync ?: return "Supabase sync unavailable"
-        return sync.signInWithGoogle(idToken).fold(
+    override fun supabaseSignIn(email: String, password: String): String? {
+        val sync = supabaseSync ?: return "Sync unavailable"
+        return sync.signIn(email, password).fold(
             onSuccess = { null },
-            onFailure = { error ->
-                val message = error.message ?: "Supabase Google sign-in failed"
-                System.err.println("Supabase Google sign-in failed: $message")
-                message
-            },
+            onFailure = { it.message ?: "Sign-in failed" },
+        )
+    }
+
+    override fun supabaseRegister(email: String, password: String): String? {
+        val sync = supabaseSync ?: return "Sync unavailable"
+        return sync.register(email, password).fold(
+            onSuccess = { null },
+            onFailure = { it.message ?: "Registration failed" },
         )
     }
 

@@ -37,11 +37,6 @@ object HelperMain {
         val (mangaCount, sourceCount) = repository.count()
 
         val networkConfig = HelperNetworkConfig()
-        // Check for an OTA parser update in the background; applies on next launch.
-        com.nyora.hasan72341.shared.extension.ParserOtaUpdater.updateInBackground(
-            SqlDelightLibraryRepository.defaultDatabasePath().parent,
-            networkConfig,
-        )
         val runtime = com.nyora.hasan72341.shared.extension.JvmExtensionRuntime(
             networkConfig = networkConfig,
         )
@@ -200,12 +195,10 @@ object HelperMain {
         for (row in mihonRows) repository.deleteSource(row.id)
         val existing = keepRows.associateBy { it.id }
 
-        // Every `parser:` id that the bundled JS engine (parsers.bundle.js) can
-        // actually open. The DB may still carry orphaned `parser:` rows seeded by
-        // an older, larger catalogue; any `parser:` source NOT in this set is
-        // pruned below so the visible catalogue matches the JS bundle exactly
-        // (same set the iOS app ships). Deleting a manga_source row is safe — no
-        // FK references it, so the user's library/history/favourites are untouched.
+        // Every `parser:` id the native engine (kotatsu-parsers-redo) ships. The DB may
+        // still carry orphaned `parser:` rows from an older catalogue; any `parser:`
+        // source NOT in this set is pruned below so the visible catalogue matches the
+        // native enum exactly.
         val validParserIds = HashSet<String>()
 
         // Pre-installed catalogue = the iOS-curated source set (ported from the
@@ -225,71 +218,45 @@ object HelperMain {
             repository.deleteSource("demo:javascript")
         }
 
-        // Seed every parser in the catalog — preferring an OTA-downloaded
-        // sources.json (kept in lockstep with the OTA bundle), else the bundled one.
-        val otaBase = SqlDelightLibraryRepository.defaultDatabasePath().parent
-        val jsonText = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.sources(otaBase)
-            ?: javaClass.classLoader.getResourceAsStream("parsers_sources.json")?.bufferedReader()?.readText()
-        if (jsonText != null) {
-            val array = kotlinx.serialization.json.Json.parseToJsonElement(jsonText).let {
-                if (it is kotlinx.serialization.json.JsonArray) it else kotlinx.serialization.json.JsonArray(emptyList())
-            }
-            for (element in array) {
-                if (element !is kotlinx.serialization.json.JsonObject) continue
-                val parserName = element["id"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: continue
-                val id = "parser:$parserName"
-                validParserIds.add(id)
-                val isNsfw = element["isNsfw"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content?.toBoolean() ?: false
-                
-                val title = element["title"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: parserName
-                val locale = element["locale"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: "all"
-                val domain = element["domain"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: ""
-                val prior = existing[id]
-                if (prior != null) {
-                    var updated = prior.copy(
-                        name = SourcePatches.TITLE_OVERRIDES[parserName] ?: title,
-                        lang = locale,
-                        baseUrl = "https://$domain",
-                        engine = SourceEngine.JavaScript,
-                        contentType = com.nyora.hasan72341.shared.model.SourceContentType.Manga,
-                        notes = "Built-in JS parser.",
-                        localPath = "classpath:parsers.bundle.js",
-                        canUninstall = false,
-                    )
-                    if (prior.isNsfw != isNsfw) updated = updated.copy(isNsfw = isNsfw)
-                    if (!curatedMigrationDone) {
-                        val shouldInstall = isCurated(parserName)
-                        if (updated.isInstalled != shouldInstall) updated = updated.copy(isInstalled = shouldInstall)
-                    }
-                    if (updated != prior) repository.upsertSource(updated)
-                    continue
-                }
-                repository.upsertSource(
-                    MangaSource(
-                        id = id,
-                        name = SourcePatches.TITLE_OVERRIDES[parserName] ?: title,
-                        lang = locale,
-                        baseUrl = "https://$domain",
-                        isInstalled = isCurated(parserName),
-                        isNsfw = isNsfw,
-                        engine = SourceEngine.JavaScript,
-                        notes = "Built-in JS parser.",
-                        canUninstall = false,
-                    )
+        // Seed every native parser (kotatsu-parsers-redo) into the catalog. Curated
+        // sources ship installed; the rest are available-but-not-installed so the user
+        // opts in (keeps global search fast). Existing rows are updated in place so a
+        // user's install/uninstall choices and NSFW flag are preserved.
+        val catalog = com.nyora.hasan72341.shared.extension.nativeParserCatalog()
+        for (seed in catalog) {
+            val id = seed.id
+            val parserName = id.removePrefix("parser:")
+            validParserIds.add(id)
+            val prior = existing[id]
+            if (prior != null) {
+                var updated = prior.copy(
+                    name = seed.name,
+                    lang = seed.lang,
+                    baseUrl = seed.baseUrl,
+                    engine = SourceEngine.Parser,
+                    contentType = seed.contentType,
+                    notes = seed.notes,
+                    localPath = seed.localPath,
+                    canUninstall = false,
                 )
+                if (prior.isNsfw != seed.isNsfw) updated = updated.copy(isNsfw = seed.isNsfw)
+                if (!curatedMigrationDone) {
+                    val shouldInstall = isCurated(parserName)
+                    if (updated.isInstalled != shouldInstall) updated = updated.copy(isInstalled = shouldInstall)
+                }
+                if (updated != prior) repository.upsertSource(updated)
+                continue
             }
+            repository.upsertSource(seed.copy(isInstalled = isCurated(parserName)))
+        }
 
-            // Prune orphaned parser sources: anything in the DB tagged `parser:`
-            // that the current bundle no longer ships (e.g. the ~800 legacy Nyora
-            // sources from an older catalogue). Without this the Explore list shows
-            // sources whose JS parser doesn't exist -> "Parser not found" on browse.
-            // Guard on a non-empty valid set so a missing/corrupt resource can't wipe
-            // the whole catalogue.
-            if (validParserIds.isNotEmpty()) {
-                for (row in keepRows) {
-                    if (row.id.startsWith("parser:") && row.id !in validParserIds) {
-                        repository.deleteSource(row.id)
-                    }
+        // Prune orphaned parser rows the current catalog no longer ships (e.g. legacy
+        // sources from an older catalogue). Deleting a manga_source row is safe — no FK
+        // references it, so the user's library/history/favourites are untouched.
+        if (validParserIds.isNotEmpty()) {
+            for (row in keepRows) {
+                if (row.id.startsWith("parser:") && row.id !in validParserIds) {
+                    repository.deleteSource(row.id)
                 }
             }
         }

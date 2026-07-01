@@ -49,79 +49,49 @@ class SupabaseSync(
 
     // ── Auth ────────────────────────────────────────────────────────────────
 
-    fun signInWithGoogle(idToken: String): Result<Unit> {
-        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Supabase not configured"))
-        debug("Starting Google Sign-In exchange with ID token (length: ${idToken.length})")
-        
-        val body = json.encodeToString(mapOf("provider" to "google", "id_token" to idToken))
-            .toRequestBody(JSON_MT)
-        val req = Request.Builder()
-            .url("${SupabaseConfig.url}/auth/v1/token?grant_type=id_token")
-            .header("apikey", SupabaseConfig.anonKey)
-            .post(body)
+    private fun applyAuth(text: String) {
+        val r = json.decodeFromString<AuthResponse>(text)
+        val previousUserId = SupabaseConfig.userId
+        val newUserId = SupabaseConfig.parseUserIdFromJwt(r.access_token)
+        val parsedEmail = SupabaseConfig.parseEmailFromJwt(r.access_token)
+        SupabaseConfig.accessToken = r.access_token
+        SupabaseConfig.refreshToken = r.refresh_token ?: ""
+        SupabaseConfig.userId = newUserId
+        if (parsedEmail.isNotBlank()) SupabaseConfig.email = parsedEmail
+        if (previousUserId.isNotBlank() && previousUserId != newUserId) {
+            SupabaseConfig.lastSyncTimestamp = INITIAL_SYNC_TIMESTAMP
+        }
+        SupabaseConfig.saveTokens(dataDir)
+    }
+
+    /** OAuth2 password grant (form-encoded) → POST /auth/token. */
+    fun signIn(email: String, password: String): Result<Unit> {
+        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
+        val body = okhttp3.FormBody.Builder()
+            .add("grant_type", "password")
+            .add("username", email.trim())
+            .add("password", password)
             .build()
-            
+        val req = Request.Builder().url("${SupabaseConfig.url}/auth/token").post(body).build()
         return runCatching {
             http.newCall(req).execute().use { resp ->
-                val text = resp.body?.string() ?: ""
-                debug("Supabase Response Code: ${resp.code}")
-                if (!resp.isSuccessful) {
-                    debug("Auth failed: $text")
-                    error("Google Auth failed ${resp.code}: $text")
-                }
-                
-                val r = json.decodeFromString<AuthResponse>(text)
-                val previousUserId = SupabaseConfig.userId
-                val newUserId = SupabaseConfig.parseUserIdFromJwt(r.access_token)
-                val newEmail = SupabaseConfig.parseEmailFromJwt(r.access_token)
-
-                debug("Successfully parsed JWT. New UserID: $newUserId Email: $newEmail")
-
-                SupabaseConfig.accessToken = r.access_token
-                SupabaseConfig.refreshToken = r.refresh_token ?: ""
-                SupabaseConfig.userId = newUserId
-                if (newEmail.isNotBlank()) SupabaseConfig.email = newEmail
-
-                debug("Updated SupabaseConfig memory variables. isAuthenticated: ${SupabaseConfig.isAuthenticated}")
-
-                if (previousUserId.isNotBlank() && previousUserId != newUserId) {
-                    debug("UserID changed. Resetting sync anchor.")
-                    SupabaseConfig.lastSyncTimestamp = INITIAL_SYNC_TIMESTAMP
-                }
-
-                SupabaseConfig.saveTokens(dataDir)
-                debug("Saved tokens to disk.")
+                val text = resp.body?.string() ?: error("Empty body")
+                check(resp.isSuccessful) { "Sign-in failed ${resp.code}: $text" }
+                applyAuth(text)
             }
         }
     }
 
-    fun signIn(email: String, password: String): Result<Unit> {
-        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Supabase not configured"))
-        val body = json.encodeToString(mapOf("email" to email, "password" to password))
-            .toRequestBody(JSON_MT)
-        val req = Request.Builder()
-            .url("${SupabaseConfig.url}/auth/v1/token?grant_type=password")
-            .header("apikey", SupabaseConfig.anonKey)
-            .post(body)
-            .build()
+    /** Create an account → POST /auth/register {email,password}; returns tokens on success. */
+    fun register(email: String, password: String): Result<Unit> {
+        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
+        val body = json.encodeToString(mapOf("email" to email.trim(), "password" to password)).toRequestBody(JSON_MT)
+        val req = Request.Builder().url("${SupabaseConfig.url}/auth/register").post(body).build()
         return runCatching {
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string() ?: error("Empty body")
-                check(resp.isSuccessful) { "Auth failed ${resp.code}: $text" }
-                val r = json.decodeFromString<AuthResponse>(text)
-                val previousUserId = SupabaseConfig.userId
-                val newUserId = SupabaseConfig.parseUserIdFromJwt(r.access_token)
-                val parsedEmail = SupabaseConfig.parseEmailFromJwt(r.access_token)
-
-                SupabaseConfig.accessToken = r.access_token
-                SupabaseConfig.refreshToken = r.refresh_token ?: ""
-                SupabaseConfig.userId = newUserId
-                if (parsedEmail.isNotBlank()) SupabaseConfig.email = parsedEmail
-
-                if (previousUserId.isNotBlank() && previousUserId != newUserId) {
-                    SupabaseConfig.lastSyncTimestamp = INITIAL_SYNC_TIMESTAMP
-                }
-                SupabaseConfig.saveTokens(dataDir)
+                check(resp.isSuccessful) { "Registration failed ${resp.code}: $text" }
+                applyAuth(text)
             }
         }
     }
@@ -129,22 +99,15 @@ class SupabaseSync(
     fun refreshToken(): Boolean {
         if (!SupabaseConfig.isConfigured || SupabaseConfig.refreshToken.isBlank()) return false
         return runCatching {
-            val body = json.encodeToString(mapOf("refresh_token" to SupabaseConfig.refreshToken))
-                .toRequestBody(JSON_MT)
-            val req = Request.Builder()
-                .url("${SupabaseConfig.url}/auth/v1/token?grant_type=refresh_token")
-                .header("apikey", SupabaseConfig.anonKey)
-                .post(body)
+            val body = okhttp3.FormBody.Builder()
+                .add("grant_type", "refresh_token")
+                .add("refresh_token", SupabaseConfig.refreshToken)
                 .build()
+            val req = Request.Builder().url("${SupabaseConfig.url}/auth/token").post(body).build()
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string() ?: return@use false
                 if (!resp.isSuccessful) return@use false
-                val r = json.decodeFromString<AuthResponse>(text)
-                SupabaseConfig.accessToken = r.access_token
-                r.refresh_token?.let { SupabaseConfig.refreshToken = it }
-                val refreshedEmail = SupabaseConfig.parseEmailFromJwt(r.access_token)
-                if (refreshedEmail.isNotBlank()) SupabaseConfig.email = refreshedEmail
-                SupabaseConfig.saveTokens(dataDir)
+                applyAuth(text)
                 true
             }
         }.getOrDefault(false)
@@ -215,6 +178,16 @@ class SupabaseSync(
         upsert("nyora_favourite", rows)
     }
 
+    // ── Cross-platform source_id normalization ───────────────────────────────
+    // Desktop namespaces parser sources locally as "parser:<NAME>", but the sync
+    // wire format is the BARE enum name <NAME> — matching Android and the already-
+    // unified `source_ref` JSON ({"name":"<NAME>"}). Strip "parser:" when writing,
+    // re-add it on read. Other source types (mihon:/local:/script:) keep their prefix.
+    private fun String.toWireSourceId(): String = removePrefix("parser:")
+
+    private fun String.fromWireSourceId(): String =
+        if (isBlank() || contains(':')) this else "parser:$this"
+
     private fun pushHistory(cutoff: Long) {
         val history = repo.allHistoryIncludingDeleted()
         if (history.isEmpty()) return
@@ -228,7 +201,7 @@ class SupabaseSync(
             val updatedAt = Instant.ofEpochMilli(h.updated_at).toString()
             rows += SbHistory(
                 user_id = uid, manga_id = h.manga_id,
-                source_id = h.source_id, chapter_id = h.chapter_id,
+                source_id = h.source_id.toWireSourceId(), chapter_id = h.chapter_id,
                 chapter_title = h.chapter_title, page = h.page.toInt(),
                 percent = h.percent.toDouble(),
                 updated_at = updatedAt,
@@ -323,7 +296,7 @@ class SupabaseSync(
         for (u in updates) {
             if (u.last_synced_at <= cutoff) continue
             rows += SbUpdate(
-                user_id = uid, manga_id = u.manga_id, source_id = u.source_id,
+                user_id = uid, manga_id = u.manga_id, source_id = u.source_id.toWireSourceId(),
                 last_chapter_count = u.last_chapter_count.toInt(), 
                 new_chapters_count = u.new_chapters_count.toInt(),
                 latest_chapter_title = u.latest_chapter_title,
@@ -343,7 +316,7 @@ class SupabaseSync(
         val rows = sources.map { s ->
             SbSourcePref(
                 user_id = uid,
-                source_id = s.id,
+                source_id = s.id.toWireSourceId(),
                 is_pinned = s.is_pinned != 0L,
                 is_enabled = true,
                 updated_at = now
@@ -456,7 +429,7 @@ class SupabaseSync(
                         manga_id = row.manga_id
                     )
                 } else {
-                    val sourceId = row.source_id.ifBlank { inferSourceIdForManga(row.manga_id) }
+                    val sourceId = row.source_id.fromWireSourceId().ifBlank { inferSourceIdForManga(row.manga_id) }
                     repo.upsertHistoryFromSync(
                         mangaId = row.manga_id, sourceId = sourceId,
                         chapterId = row.chapter_id, chapterTitle = row.chapter_title,
@@ -519,7 +492,7 @@ class SupabaseSync(
         runCatching {
             json.decodeFromString<List<SbUpdate>>(text).forEach { row ->
                 repo.recordUpdateSync(
-                    mangaId = row.manga_id, sourceId = row.source_id,
+                    mangaId = row.manga_id, sourceId = row.source_id.fromWireSourceId(),
                     currentChapterCount = row.last_chapter_count,
                     latestChapterTitle = row.latest_chapter_title,
                 )
@@ -532,11 +505,12 @@ class SupabaseSync(
         runCatching {
             val rows = json.decodeFromString<List<SbSourcePref>>(text)
             rows.forEach { row ->
-                val existing = repo.database.mangaSourceQueries.selectById(row.source_id).executeAsOneOrNull()
+                val localId = row.source_id.fromWireSourceId()
+                val existing = repo.database.mangaSourceQueries.selectById(localId).executeAsOneOrNull()
                 if (existing != null) {
                     val currentPinned = existing.is_pinned != 0L
                     if (currentPinned != row.is_pinned) {
-                        repo.database.mangaSourceQueries.togglePin(row.source_id)
+                        repo.database.mangaSourceQueries.togglePin(localId)
                     }
                 }
             }
