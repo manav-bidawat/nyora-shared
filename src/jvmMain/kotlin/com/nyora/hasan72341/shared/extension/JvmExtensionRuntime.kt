@@ -9,31 +9,33 @@ class JvmExtensionRuntime(
     private val networkConfig: HelperNetworkConfig = HelperNetworkConfig(),
 ) : MangaExtensionRuntime {
 
+    private val nativeFactory: (MangaSource) -> MangaExtensionService =
+        { source -> KotatsuParserExtensionService(source, networkConfig = networkConfig) }
+
     private val delegate = CommonMangaExtensionRuntime(
-        jsFactory = { source -> JavaScriptExtensionService(source, networkConfig = networkConfig) },
+        // Native kotatsu-parsers-redo engine. Both the canonical "Parser" engine and any
+        // legacy "JavaScript"-tagged rows (from before the native migration) route here —
+        // seedBuiltInSources re-stamps them to Parser on launch.
+        jsFactory = nativeFactory,
         mihonFactory = { source ->
             UnsupportedExtensionService(
                 source = source,
                 reason = "Mihon APK sources require a Dalvik-compatible runtime. Not supported on desktop JVM.",
             )
         },
-        parserFactory = { source ->
-            // Route all legacy "Parser" engine requests to the new JS engine
-            JavaScriptExtensionService(source, networkConfig = networkConfig)
-        },
+        parserFactory = nativeFactory,
     )
 
-    // Cache JS-backed services per source. Each one lazily builds a GraalVM
-    // context that evaluates the ~400KB parser bundle, so rebuilding it on every
-    // REST request (browse/details/pages are separate calls) would be very slow.
-    // Caching also lets redirect-resolved domains (window.__domainOverrides)
-    // persist across calls — a source that has moved is resolved once per session.
-    private val jsCache = ConcurrentHashMap<String, MangaExtensionService>()
+    // Cache parser-backed services per source. Each one instantiates a native parser
+    // (and its OkHttp/loader context), so rebuilding it on every REST request
+    // (browse/details/pages are separate calls) would be wasteful. Caching also lets
+    // any per-parser state (resolved/overridden domain) persist across calls.
+    private val serviceCache = ConcurrentHashMap<String, MangaExtensionService>()
 
     override fun create(source: MangaSource): MangaExtensionService =
         when (source.engine) {
             SourceEngine.JavaScript, SourceEngine.Parser ->
-                jsCache.getOrPut(source.id) { delegate.create(source) }
+                serviceCache.getOrPut(source.id) { delegate.create(source) }
             else -> delegate.create(source)
         }
 }

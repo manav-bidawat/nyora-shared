@@ -10,7 +10,7 @@ object SupabaseConfig {
     // .env.sync. The Supabase URL + publishable anon key and the OAuth client IDs
     // are public by design (RLS protects the data; client IDs ship in every OAuth
     // request). env vars / .env.sync override these via load().
-    var url: String = "https://fqguzcoytnbnjwaddakn.supabase.co"
+    var url: String = "https://stream.hasanraza.tech"
     var anonKey: String = "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
     var accessToken: String = ""
     var refreshToken: String = ""
@@ -23,7 +23,7 @@ object SupabaseConfig {
     // never baked into the open-source tree. load() fills this in.
     var googleClientSecret: String = ""
 
-    val isConfigured: Boolean get() = url.isNotBlank() && anonKey.isNotBlank()
+    val isConfigured: Boolean get() = url.isNotBlank()
     val isAuthenticated: Boolean get() = accessToken.isNotBlank() && userId.isNotBlank()
 
     fun load(dataDir: Path) {
@@ -38,9 +38,8 @@ object SupabaseConfig {
             ?: env[key]?.takeIf { it.isNotBlank() }
             ?: res[key]?.takeIf { it.isNotBlank() }
 
-        url = cfg("SUPABASE_URL")
-            ?: readProp(dataDir, "url").takeIf { it.isNotBlank() }
-            ?: "https://fqguzcoytnbnjwaddakn.supabase.co"
+        // Self-hosted Nyora sync server (OAuth2/JWT — replaces Supabase + Google).
+        url = "https://stream.hasanraza.tech"
         anonKey = cfg("SUPABASE_ANON_KEY")
             ?: readProp(dataDir, "anon_key").takeIf { it.isNotBlank() }
             ?: "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
