@@ -56,9 +56,11 @@ else
 fi
 
 # 4) Refresh the browse-cache sidecar so it revalidates against the fresh helper.
-if systemctl list-unit-files 2>/dev/null | grep -q '^nyora-cache-proxy'; then
+if systemctl cat nyora-cache-proxy >/dev/null 2>&1; then
   log "restarting browse-cache sidecar (nyora-cache-proxy)…"
   sudo systemctl restart nyora-cache-proxy || echo "[nyora] WARNING: sidecar restart failed" >&2
+else
+  log "no nyora-cache-proxy unit found; skipping sidecar refresh."
 fi
 
 log "done. api.hasanraza.tech now serves a fresh catalog + revalidated browse cache."
