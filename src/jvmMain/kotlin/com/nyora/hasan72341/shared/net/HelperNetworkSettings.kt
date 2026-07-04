@@ -13,6 +13,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import kotlinx.serialization.Serializable
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -86,8 +87,20 @@ fun injectClearanceCookies(domain: String, cookieHeader: String) {
     sharedCookieJar.put(url, cookieHeader)
 }
 
+// Uncap OkHttp's request concurrency: the defaults (maxRequests=64,
+// maxRequestsPerHost=5) throttle throughput to a given CDN to 5 parallel
+// connections, which bottlenecks image/page streaming. Lift them so the helper
+// uses the full available network bandwidth (the physical VM link stays the
+// only real ceiling). Overridable via NYORA_MAX_REQUESTS / NYORA_MAX_PER_HOST.
+private val unlimitedDispatcher: Dispatcher
+    get() = Dispatcher().apply {
+        maxRequests = System.getenv("NYORA_MAX_REQUESTS")?.toIntOrNull() ?: 1024
+        maxRequestsPerHost = System.getenv("NYORA_MAX_PER_HOST")?.toIntOrNull() ?: 256
+    }
+
 fun buildOkHttpClient(settings: HelperNetworkSettings): OkHttpClient =
     OkHttpClient.Builder()
+        .dispatcher(unlimitedDispatcher)
         .followRedirects(true)
         .followSslRedirects(true)
         .cookieJar(sharedCookieJar)
