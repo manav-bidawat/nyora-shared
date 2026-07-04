@@ -90,9 +90,11 @@ class NyoraRestServer(
     }
     private var server: HttpServer? = null
 
-    // Background workers for serve-stale-while-revalidate + startup pre-warm, so
-    // users never wait on a cold upstream fetch. Daemon so they never block exit.
-    private val backgroundExecutor = Executors.newFixedThreadPool(4) { r ->
+    // Background worker for serve-stale-while-revalidate. SINGLE thread on purpose:
+    // a stale Cloudflare-protected source triggers a FlareSolverr (headless Chrome)
+    // solve, and firing several at once swamps the small VM. Serializing to one
+    // keeps at most one solve in flight. Daemon so it never blocks exit.
+    private val backgroundExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "nyora-revalidate").apply { isDaemon = true }
     }
     private val revalidating = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -196,7 +198,11 @@ class NyoraRestServer(
      *  fetch). Cheap, bounded, best-effort; failures are ignored. Skips keys the
      *  persistent snapshot already restored. Disable with NYORA_PREWARM=0. */
     private fun prewarmCache() {
-        if (System.getenv("NYORA_PREWARM") == "0") return
+        // OPT-IN (NYORA_PREWARM=1): on the tiny hosted VM, eagerly fetching many
+        // sources at boot triggers a storm of FlareSolverr (Chrome) solves for
+        // CF-protected sources and saturates the box. The persistent snapshot +
+        // serve-stale already make restarts instant, so pre-warm is off by default.
+        if (System.getenv("NYORA_PREWARM") != "1") return
         // ONE low-priority background thread, SEQUENTIAL with a gap between fetches
         // so it never spikes CPU on the small box. Skips any key that already has a
         // cached copy (fresh OR stale) — serve-stale-while-revalidate refreshes
