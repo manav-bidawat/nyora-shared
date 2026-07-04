@@ -100,37 +100,43 @@ object CloudflareInterceptor : Interceptor {
         }
 
         val response = chain.proceed(request)
-        if (!isChallenge(response)) return response
+        // Escalate on ANY 403/503 — either a JS challenge (has CF markers) OR a hard
+        // datacenter-IP block (e.g. MangaFire on claw returns a bare 403 with no
+        // challenge markers). Both mean "this server IP can't get through" → the fix
+        // is the same: reach the site from a different (residential) egress.
+        if (response.code != 403 && response.code != 503) return response
+        val challenge = isChallenge(response)
 
         // 1) Server-side solve: classic "Just a moment" JS challenges (cheap, fast).
-        val solution = FlareSolverr.solve(request.url.toString())
-        if (solution != null) {
-            response.close()
-            injectClearanceCookies(host, solution.cookieHeader)
-            solvedUserAgent[host] = solution.userAgent
-            return chain.proceed(request.newBuilder().header("User-Agent", solution.userAgent).build())
+        if (challenge) {
+            val solution = FlareSolverr.solve(request.url.toString())
+            if (solution != null) {
+                response.close()
+                injectClearanceCookies(host, solution.cookieHeader)
+                solvedUserAgent[host] = solution.userAgent
+                return chain.proceed(request.newBuilder().header("User-Agent", solution.userAgent).build())
+            }
         }
 
         // 2) Residential-proxy egress: some sources (e.g. MangaFire) block ALL
-        //    datacenter IPs at the edge (403/503) — no header/challenge trick works,
-        //    they only serve residential IPs. Retry via a user-supplied residential
-        //    proxy so the request egresses from a residential IP. No-op unless
-        //    NYORA_RESIDENTIAL_PROXY is set.
+        //    datacenter IPs at the edge — they only serve residential IPs. Retry via
+        //    a user-supplied residential proxy. No-op unless NYORA_RESIDENTIAL_PROXY
+        //    is set. Works for every client (web + iOS) transparently.
         if (ResidentialProxy.isConfigured) {
             val proxied = ResidentialProxy.fetch(request)
-            if (proxied != null && !isChallenge(proxied)) {
+            if (proxied != null && proxied.code != 403 && proxied.code != 503) {
                 response.close()
                 return proxied
             }
             proxied?.close()
         }
 
-        // 3) Device-as-egress: for Turnstile (which FlareSolverr can't beat), a
-        //    connected phone performs the fetch from its own IP + WebView-cleared
-        //    session and streams the bytes back. cf_clearance is IP-locked, so this
-        //    is the only free way to serve Turnstile sites.
+        // 3) Device-as-egress: a connected client (iOS phone) fetches from ITS OWN
+        //    residential IP + WebView-cleared session and streams the bytes back —
+        //    the free way to use the CUSTOMER's IP despite the helper being on a VM.
+        //    Beats both Turnstile AND datacenter-IP blocks (phone IP is residential).
         val relayed = relayViaDevice(request)
-        if (relayed != null) {
+        if (relayed != null && relayed.code != 403 && relayed.code != 503) {
             response.close()
             return relayed
         }
