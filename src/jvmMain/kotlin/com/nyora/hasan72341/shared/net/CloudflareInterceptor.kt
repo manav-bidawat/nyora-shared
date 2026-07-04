@@ -56,7 +56,8 @@ internal object FlareSolverr {
             val payload = buildJsonObject {
                 put("cmd", "request.get")
                 put("url", url)
-                put("maxTimeout", 90_000)
+                // Shorter than the old 90s so a broad search isn't pinned per solve.
+                put("maxTimeout", System.getenv("NYORA_FLARESOLVERR_TIMEOUT_MS")?.toIntOrNull() ?: 30_000)
             }.toString()
             val request = Request.Builder()
                 .url(endpoint)
@@ -98,6 +99,19 @@ internal object FlareSolverr {
 object CloudflareInterceptor : Interceptor {
     private val solvedUserAgent = ConcurrentHashMap<String, String>()
 
+    // Hosts that were blocked AND couldn't be solved recently. Skip the expensive
+    // escalation (FlareSolverr/proxy/device) for them so a broad all-source search
+    // doesn't re-solve the same unbeatable Cloudflare sites over and over and pin
+    // the VM (headless-Chrome storm). Cleared when a host later succeeds.
+    private val blockedUntil = ConcurrentHashMap<String, Long>()
+    private val blockTtlMs: Long = System.getenv("NYORA_BLOCK_TTL_MS")?.toLongOrNull() ?: 600_000L // 10 min
+
+    private fun hostBlocked(host: String): Boolean {
+        val until = blockedUntil[host] ?: return false
+        if (System.currentTimeMillis() > until) { blockedUntil.remove(host); return false }
+        return true
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
         var request = chain.request()
         val host = request.url.host
@@ -113,7 +127,12 @@ object CloudflareInterceptor : Interceptor {
         // datacenter-IP block (e.g. MangaFire on claw returns a bare 403 with no
         // challenge markers). Both mean "this server IP can't get through" → the fix
         // is the same: reach the site from a different (residential) egress.
-        if (response.code != 403 && response.code != 503) return response
+        if (response.code != 403 && response.code != 503) {
+            blockedUntil.remove(host) // recovered
+            return response
+        }
+        // Fail fast for hosts we already know we can't get through — no re-solve churn.
+        if (hostBlocked(host)) return response
         val challenge = isChallenge(response)
 
         // 1) Server-side solve: classic "Just a moment" JS challenges (cheap, fast).
@@ -150,6 +169,9 @@ object CloudflareInterceptor : Interceptor {
             return relayed
         }
 
+        // Nothing got through — remember this host as blocked so we fail fast next
+        // time instead of re-solving it on every search.
+        blockedUntil[host] = System.currentTimeMillis() + blockTtlMs
         return response
     }
 
