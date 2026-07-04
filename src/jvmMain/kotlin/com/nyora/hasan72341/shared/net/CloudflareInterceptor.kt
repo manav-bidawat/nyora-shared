@@ -33,6 +33,12 @@ internal object FlareSolverr {
     /** Absent env → enabled; set NYORA_FLARESOLVERR_DISABLED=1 to turn off. */
     private val enabled: Boolean = System.getenv("NYORA_FLARESOLVERR_DISABLED").isNullOrBlank()
 
+    // Each solve spawns a headless Chrome. A batched all-source search hits many
+    // CF sources at once, so cap concurrent solves (default 2) to stop a Chrome
+    // swarm from saturating the small VM. Extra solves wait for a permit.
+    private val maxConcurrent: Int = System.getenv("NYORA_FLARESOLVERR_CONCURRENCY")?.toIntOrNull()?.coerceIn(1, 8) ?: 2
+    private val gate = java.util.concurrent.Semaphore(maxConcurrent)
+
     private val json = Json { ignoreUnknownKeys = true }
 
     // Separate client (no CF interceptor) so solving never recurses.
@@ -45,6 +51,7 @@ internal object FlareSolverr {
 
     fun solve(url: String): Solution? {
         if (!enabled) return null
+        if (!gate.tryAcquire(120, TimeUnit.SECONDS)) return null // don't queue forever
         return try {
             val payload = buildJsonObject {
                 put("cmd", "request.get")
@@ -72,6 +79,8 @@ internal object FlareSolverr {
             }
         } catch (_: Throwable) {
             null
+        } finally {
+            gate.release()
         }
     }
 }
