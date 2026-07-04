@@ -689,12 +689,21 @@ class NyoraRestServer(
         cacheKey: String?,
     ): String {
         val service = facade.openExtension(source)
-        val result = runBlocking {
-            when (mode) {
-                BrowseMode.POPULAR -> service.getPopular(page)
-                BrowseMode.LATEST -> service.getLatest(page)
-                BrowseMode.SEARCH -> service.search(query, page, filters)
+        // Mark search fetches so CloudflareInterceptor skips CF-solving (fail fast on
+        // blocked sources) — a broad all-source search must never trigger a Chrome
+        // storm. Covers concurrent fan-out via a counter.
+        val isSearch = mode == BrowseMode.SEARCH
+        if (isSearch) com.nyora.hasan72341.shared.net.CloudflareInterceptor.searchFanoutActive.incrementAndGet()
+        val result = try {
+            runBlocking {
+                when (mode) {
+                    BrowseMode.POPULAR -> service.getPopular(page)
+                    BrowseMode.LATEST -> service.getLatest(page)
+                    BrowseMode.SEARCH -> service.search(query, page, filters)
+                }
             }
+        } finally {
+            if (isSearch) com.nyora.hasan72341.shared.net.CloudflareInterceptor.searchFanoutActive.decrementAndGet()
         }
         val body = json.encodeToString(
             BrowseResponse.serializer(),

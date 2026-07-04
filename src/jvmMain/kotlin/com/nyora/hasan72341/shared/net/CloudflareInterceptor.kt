@@ -99,6 +99,12 @@ internal object FlareSolverr {
 object CloudflareInterceptor : Interceptor {
     private val solvedUserAgent = ConcurrentHashMap<String, String>()
 
+    // While a broad global search is fanning out, skip ALL Cloudflare escalation
+    // (FlareSolverr/proxy/device) and fail fast on blocked sources — solving CF for
+    // hundreds of sources at once would pin the VM. Blocked sources simply don't
+    // appear in search results. Incremented/decremented around each search fetch.
+    val searchFanoutActive = java.util.concurrent.atomic.AtomicInteger(0)
+
     // Hosts that were blocked AND couldn't be solved recently. Skip the expensive
     // escalation (FlareSolverr/proxy/device) for them so a broad all-source search
     // doesn't re-solve the same unbeatable Cloudflare sites over and over and pin
@@ -131,6 +137,9 @@ object CloudflareInterceptor : Interceptor {
             blockedUntil.remove(host) // recovered
             return response
         }
+        // During a broad search, never solve CF — fail fast so blocked sources are
+        // just skipped instead of pinning the VM with hundreds of Chrome solves.
+        if (searchFanoutActive.get() > 0) return response
         // Fail fast for hosts we already know we can't get through — no re-solve churn.
         if (hostBlocked(host)) return response
         val challenge = isChallenge(response)
