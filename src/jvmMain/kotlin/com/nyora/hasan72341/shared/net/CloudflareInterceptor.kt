@@ -111,7 +111,21 @@ object CloudflareInterceptor : Interceptor {
             return chain.proceed(request.newBuilder().header("User-Agent", solution.userAgent).build())
         }
 
-        // 2) Device-as-egress: for Turnstile (which FlareSolverr can't beat), a
+        // 2) Residential-proxy egress: some sources (e.g. MangaFire) block ALL
+        //    datacenter IPs at the edge (403/503) — no header/challenge trick works,
+        //    they only serve residential IPs. Retry via a user-supplied residential
+        //    proxy so the request egresses from a residential IP. No-op unless
+        //    NYORA_RESIDENTIAL_PROXY is set.
+        if (ResidentialProxy.isConfigured) {
+            val proxied = ResidentialProxy.fetch(request)
+            if (proxied != null && !isChallenge(proxied)) {
+                response.close()
+                return proxied
+            }
+            proxied?.close()
+        }
+
+        // 3) Device-as-egress: for Turnstile (which FlareSolverr can't beat), a
         //    connected phone performs the fetch from its own IP + WebView-cleared
         //    session and streams the bytes back. cf_clearance is IP-locked, so this
         //    is the only free way to serve Turnstile sites.
