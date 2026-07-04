@@ -13,7 +13,9 @@ import com.nyora.hasan72341.shared.model.MangaChapter
 import com.nyora.hasan72341.shared.model.MangaPage
 import com.nyora.hasan72341.shared.model.MangaSource
 import com.nyora.hasan72341.shared.reader.PageImageLoader
+import com.sun.net.httpserver.Filter
 import com.sun.net.httpserver.HttpExchange
+import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -108,83 +110,83 @@ class NyoraRestServer(
     fun start(): String {
         if (server != null) return baseUrl
         val httpServer = HttpServer.create(InetSocketAddress(host, port), 0).apply {
-            createContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
-            createContext("/docs") { handleDocs(it) }
-            createContext("/openapi.yaml") { handleOpenApiSpec(it) }
-            createContext("/device/relay/poll") { handleDeviceRelayPoll(it) }
-            createContext("/device/relay/result") { handleDeviceRelayResult(it) }
-            createContext("/sources/refresh") { handleRefresh(it) }
-            createContext("/sources/catalog") { handleCatalog(it) }
-            createContext("/sources/install") { handleInstall(it) }
-            createContext("/sources/uninstall") { handleUninstall(it) }
-            createContext("/sources/pin") { handlePin(it) }
-            createContext("/sources/filters") { handleFilters(it) }
-            createContext("/sources/popular") { handleBrowse(it, BrowseMode.POPULAR) }
-            createContext("/sources/latest") { handleBrowse(it, BrowseMode.LATEST) }
-            createContext("/sources/search") { handleBrowse(it, BrowseMode.SEARCH) }
-            createContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
-            createContext("/sources") { handleSources(it) }
-            createContext("/manga/details") { handleDetails(it) }
-            createContext("/manga/pages") { handlePages(it) }
-            createContext("/image") { handleImage(it) }
-            createContext("/library/history/record") { handleHistoryRecord(it) }
-            createContext("/library/history/remove") { handleHistoryRemove(it) }
-            createContext("/library/history/clear") { handleHistoryClear(it) }
-            createContext("/library/history") { handleHistory(it) }
-            createContext("/library/clear") { handleLibraryClear(it) }
-            createContext("/library/favourites/toggle") { handleFavouriteToggle(it) }
-            createContext("/library/favourites/check") { handleFavouriteCheck(it) }
-            createContext("/library/favourites") { handleFavourites(it) }
-            createContext("/library/bookmarks/add") { handleBookmarkAdd(it) }
-            createContext("/library/bookmarks/remove") { handleBookmarkRemove(it) }
-            createContext("/library/bookmarks/check") { handleBookmarkCheck(it) }
-            createContext("/library/bookmarks") { handleBookmarks(it) }
-            createContext("/library/updates/refresh") { handleUpdatesRefresh(it) }
-            createContext("/library/updates/seen") { handleUpdatesSeen(it) }
-            createContext("/library/updates") { handleUpdates(it) }
-            createContext("/local/scan") { handleLocalScan(it) }
-            createContext("/local/chapter") { handleLocalChapter(it) }
-            createContext("/local/image") { handleLocalImage(it) }
-            createContext("/search/global") { handleGlobalSearch(it) }
-            createContext("/library/categories/create") { handleCategoryCreate(it) }
-            createContext("/library/categories/rename") { handleCategoryRename(it) }
-            createContext("/library/categories/delete") { handleCategoryDelete(it) }
-            createContext("/library/categories/add") { handleCategoryAdd(it) }
-            createContext("/library/categories/remove") { handleCategoryRemove(it) }
-            createContext("/library/categories/manga") { handleCategoriesForManga(it) }
-            createContext("/library/categories") { handleCategories(it) }
-            createContext("/manga/prefs/save") { handleMangaPrefsSave(it) }
-            createContext("/manga/prefs/clear") { handleMangaPrefsClear(it) }
-            createContext("/manga/prefs") { handleMangaPrefs(it) }
-            createContext("/downloads/start") { handleDownloadStart(it) }
-            createContext("/downloads/enqueue") { handleDownloadEnqueue(it) }
-            createContext("/downloads/cancel") { handleDownloadCancel(it) }
-            createContext("/downloads/settings") { handleDownloadSettings(it) }
-            createContext("/settings/network") { handleNetworkSettings(it) }
-            createContext("/downloads") { handleDownloads(it) }
-            createContext("/stats") { handleStats(it) }
-            createContext("/suggestions") { handleSuggestions(it) }
-            createContext("/manga/alternatives") { handleAlternatives(it) }
-            createContext("/backup/export") { handleBackupExport(it) }
-            createContext("/backup/import") { handleBackupImport(it) }
-            createContext("/tracker/anilist/search") { handleAniListSearch(it) }
-            createContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
-            createContext("/tracker/myanimelist/search") { handleMalSearch(it) }
-            createContext("/tracker/myanimelist/scrobble") { handleMalScrobble(it) }
-            createContext("/tracker/kitsu/search") { handleKitsuSearch(it) }
-            createContext("/tracker/kitsu/scrobble") { handleKitsuScrobble(it) }
-            createContext("/tracker/shikimori/search") { handleShikimoriSearch(it) }
-            createContext("/tracker/shikimori/scrobble") { handleShikimoriScrobble(it) }
-            createContext("/supabase/status") { handleSupabaseStatus(it) }
-            createContext("/supabase/signin") { handleSupabaseSignIn(it) }
-            createContext("/supabase/register") { handleSupabaseRegister(it) }
-            createContext("/supabase/signout") { handleSupabaseSignOut(it) }
-            createContext("/supabase/sync") { handleSupabaseSync(it) }
-            createContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
-            createContext("/supabase/has-local-data") { handleSupabaseHasLocalData(it) }
-            createContext("/ota/check") { handleOtaCheck(it) }
-            createContext("/ota/status") { handleOtaStatus(it) }
-            createContext("/") { handleRoot(it) }
+            guardedContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
+            guardedContext("/docs") { handleDocs(it) }
+            guardedContext("/openapi.yaml") { handleOpenApiSpec(it) }
+            guardedContext("/device/relay/poll") { handleDeviceRelayPoll(it) }
+            guardedContext("/device/relay/result") { handleDeviceRelayResult(it) }
+            guardedContext("/sources/refresh") { handleRefresh(it) }
+            guardedContext("/sources/catalog") { handleCatalog(it) }
+            guardedContext("/sources/install") { handleInstall(it) }
+            guardedContext("/sources/uninstall") { handleUninstall(it) }
+            guardedContext("/sources/pin") { handlePin(it) }
+            guardedContext("/sources/filters") { handleFilters(it) }
+            guardedContext("/sources/popular") { handleBrowse(it, BrowseMode.POPULAR) }
+            guardedContext("/sources/latest") { handleBrowse(it, BrowseMode.LATEST) }
+            guardedContext("/sources/search") { handleBrowse(it, BrowseMode.SEARCH) }
+            guardedContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
+            guardedContext("/sources") { handleSources(it) }
+            guardedContext("/manga/details") { handleDetails(it) }
+            guardedContext("/manga/pages") { handlePages(it) }
+            guardedContext("/image") { handleImage(it) }
+            guardedContext("/library/history/record") { handleHistoryRecord(it) }
+            guardedContext("/library/history/remove") { handleHistoryRemove(it) }
+            guardedContext("/library/history/clear") { handleHistoryClear(it) }
+            guardedContext("/library/history") { handleHistory(it) }
+            guardedContext("/library/clear") { handleLibraryClear(it) }
+            guardedContext("/library/favourites/toggle") { handleFavouriteToggle(it) }
+            guardedContext("/library/favourites/check") { handleFavouriteCheck(it) }
+            guardedContext("/library/favourites") { handleFavourites(it) }
+            guardedContext("/library/bookmarks/add") { handleBookmarkAdd(it) }
+            guardedContext("/library/bookmarks/remove") { handleBookmarkRemove(it) }
+            guardedContext("/library/bookmarks/check") { handleBookmarkCheck(it) }
+            guardedContext("/library/bookmarks") { handleBookmarks(it) }
+            guardedContext("/library/updates/refresh") { handleUpdatesRefresh(it) }
+            guardedContext("/library/updates/seen") { handleUpdatesSeen(it) }
+            guardedContext("/library/updates") { handleUpdates(it) }
+            guardedContext("/local/scan") { handleLocalScan(it) }
+            guardedContext("/local/chapter") { handleLocalChapter(it) }
+            guardedContext("/local/image") { handleLocalImage(it) }
+            guardedContext("/search/global") { handleGlobalSearch(it) }
+            guardedContext("/library/categories/create") { handleCategoryCreate(it) }
+            guardedContext("/library/categories/rename") { handleCategoryRename(it) }
+            guardedContext("/library/categories/delete") { handleCategoryDelete(it) }
+            guardedContext("/library/categories/add") { handleCategoryAdd(it) }
+            guardedContext("/library/categories/remove") { handleCategoryRemove(it) }
+            guardedContext("/library/categories/manga") { handleCategoriesForManga(it) }
+            guardedContext("/library/categories") { handleCategories(it) }
+            guardedContext("/manga/prefs/save") { handleMangaPrefsSave(it) }
+            guardedContext("/manga/prefs/clear") { handleMangaPrefsClear(it) }
+            guardedContext("/manga/prefs") { handleMangaPrefs(it) }
+            guardedContext("/downloads/start") { handleDownloadStart(it) }
+            guardedContext("/downloads/enqueue") { handleDownloadEnqueue(it) }
+            guardedContext("/downloads/cancel") { handleDownloadCancel(it) }
+            guardedContext("/downloads/settings") { handleDownloadSettings(it) }
+            guardedContext("/settings/network") { handleNetworkSettings(it) }
+            guardedContext("/downloads") { handleDownloads(it) }
+            guardedContext("/stats") { handleStats(it) }
+            guardedContext("/suggestions") { handleSuggestions(it) }
+            guardedContext("/manga/alternatives") { handleAlternatives(it) }
+            guardedContext("/backup/export") { handleBackupExport(it) }
+            guardedContext("/backup/import") { handleBackupImport(it) }
+            guardedContext("/tracker/anilist/search") { handleAniListSearch(it) }
+            guardedContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
+            guardedContext("/tracker/myanimelist/search") { handleMalSearch(it) }
+            guardedContext("/tracker/myanimelist/scrobble") { handleMalScrobble(it) }
+            guardedContext("/tracker/kitsu/search") { handleKitsuSearch(it) }
+            guardedContext("/tracker/kitsu/scrobble") { handleKitsuScrobble(it) }
+            guardedContext("/tracker/shikimori/search") { handleShikimoriSearch(it) }
+            guardedContext("/tracker/shikimori/scrobble") { handleShikimoriScrobble(it) }
+            guardedContext("/supabase/status") { handleSupabaseStatus(it) }
+            guardedContext("/supabase/signin") { handleSupabaseSignIn(it) }
+            guardedContext("/supabase/register") { handleSupabaseRegister(it) }
+            guardedContext("/supabase/signout") { handleSupabaseSignOut(it) }
+            guardedContext("/supabase/sync") { handleSupabaseSync(it) }
+            guardedContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
+            guardedContext("/supabase/has-local-data") { handleSupabaseHasLocalData(it) }
+            guardedContext("/ota/check") { handleOtaCheck(it) }
+            guardedContext("/ota/status") { handleOtaStatus(it) }
+            guardedContext("/") { handleRoot(it) }
             executor = newServerExecutor()
             start()
         }
@@ -2560,6 +2562,84 @@ private val SWAGGER_UI_HTML: String = """
  * I/O-bound parser requests cost ~tens of MB instead of one OS-thread stack each — the
  * key to serving ~1k users in a tight RAM budget. Falls back to a bounded pool pre-21.
  */
+/**
+ * Overload + abuse guard applied to every route. Two protections so the small VM
+ * degrades gracefully under load (target: survive 5k users) instead of thrashing:
+ *  - Global in-flight cap → shed excess with 503 (bounds threads/memory/CPU).
+ *  - Per-client-IP token bucket → one abuser can't monopolize the box (429).
+ * Loopback + long-poll (device relay) bypass the caps. Tunable via env.
+ */
+private object GuardFilter : Filter() {
+    private val maxInFlight = System.getenv("NYORA_MAX_INFLIGHT")?.toIntOrNull() ?: 150
+    private val perIpRate = System.getenv("NYORA_PER_IP_RATE")?.toDoubleOrNull() ?: 25.0   // tokens/sec
+    private val perIpBurst = System.getenv("NYORA_PER_IP_BURST")?.toDoubleOrNull() ?: 60.0
+
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private class Bucket(var tokens: Double, var last: Long)
+    private val buckets = java.util.concurrent.ConcurrentHashMap<String, Bucket>()
+
+    private fun clientIp(exchange: HttpExchange): String {
+        exchange.requestHeaders.getFirst("X-Real-IP")?.let { if (it.isNotBlank()) return it.trim() }
+        exchange.requestHeaders.getFirst("X-Forwarded-For")?.let {
+            val first = it.substringBefore(',').trim(); if (first.isNotBlank()) return first
+        }
+        return exchange.remoteAddress?.address?.hostAddress ?: "?"
+    }
+
+    private fun allow(ip: String): Boolean {
+        val now = System.currentTimeMillis()
+        val b = buckets.computeIfAbsent(ip) { Bucket(perIpBurst, now) }
+        synchronized(b) {
+            b.tokens = minOf(perIpBurst, b.tokens + (now - b.last) / 1000.0 * perIpRate)
+            b.last = now
+            if (buckets.size > 20_000) buckets.clear() // crude cap so the map can't grow unbounded
+            if (b.tokens < 1.0) return false
+            b.tokens -= 1.0
+            return true
+        }
+    }
+
+    private fun reject(exchange: HttpExchange, code: Int, msg: String) {
+        try {
+            val bytes = msg.toByteArray()
+            exchange.responseHeaders.add("Access-Control-Allow-Origin", "*")
+            exchange.responseHeaders.add("Retry-After", "2")
+            exchange.sendResponseHeaders(code, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        } catch (_: Throwable) { /* client gone */ } finally { exchange.close() }
+    }
+
+    override fun doFilter(exchange: HttpExchange, chain: Chain) {
+        val ip = clientIp(exchange)
+        val path = exchange.requestURI.path.orEmpty()
+        val loopback = ip == "127.0.0.1" || ip == "::1" || ip == "?"
+        // Long-poll + health bypass admission control (they must stay responsive).
+        val bypass = loopback || path.startsWith("/device/relay/poll") || path == "/health"
+
+        if (!bypass && !allow(ip)) { reject(exchange, 429, "Too many requests"); return }
+        if (!bypass) {
+            if (inFlight.incrementAndGet() > maxInFlight) {
+                inFlight.decrementAndGet()
+                reject(exchange, 503, "Server busy, retry shortly")
+                return
+            }
+        }
+        try {
+            chain.doFilter(exchange)
+        } finally {
+            if (!bypass) inFlight.decrementAndGet()
+        }
+    }
+
+    override fun description() = "Nyora overload/rate guard"
+}
+
+/** createContext + attach the shared overload/rate guard. */
+private fun HttpServer.guardedContext(path: String, handler: HttpHandler) {
+    createContext(path, handler).filters.add(GuardFilter)
+}
+
 private fun newServerExecutor(): java.util.concurrent.Executor =
     runCatching {
         java.util.concurrent.Executors::class.java
