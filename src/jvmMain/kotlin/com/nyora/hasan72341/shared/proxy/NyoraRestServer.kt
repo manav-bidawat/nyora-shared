@@ -594,7 +594,7 @@ class NyoraRestServer(
         if (sid.isEmpty() || !coverResolveAttempted.add(manga.id)) return ""
         val source = facade.listSources().firstOrNull { it.id == sid } ?: return ""
         return try {
-            val service = facade.openExtension(source)
+            val service = openInstalled(source)
             val results = runBlocking { service.search(manga.title, 1, emptyList()).entries }
             fun slugBase(u: String) =
                 u.trimEnd('/').substringAfterLast('/').substringBeforeLast('-')
@@ -676,9 +676,22 @@ class NyoraRestServer(
             val body = fetchBrowseBody(source, mode, page, params["q"].orEmpty(), filters, cacheKey)
             respondJsonRaw(exchange, 200, body)
         } catch (error: Exception) {
-            respondError(exchange, 500, error.message ?: "Browse failed")
+            // Global search fans out across hundreds of sources; a blocked/dead/
+            // timing-out one should yield NO results (empty 200), not a 500 that
+            // floods the client console. Single-source browse still surfaces 500.
+            if (mode == BrowseMode.SEARCH) {
+                respondJsonRaw(exchange, 200, json.encodeToString(BrowseResponse.serializer(), BrowseResponse(emptyList(), false)))
+            } else {
+                respondError(exchange, 500, error.message ?: "Browse failed")
+            }
         }
     }
+
+    /** Open a source's extension, forcing the installed flag — the native parsers
+     *  are all bundled, so the isInstalled require() is just a UI guard that would
+     *  otherwise 500 any not-yet-installed source (common with all-enabled). */
+    private fun openInstalled(source: MangaSource) =
+        facade.openExtension(if (source.isInstalled) source else source.copy(isInstalled = true))
 
     /** Fetch a browse page from the source, serialize it, and cache non-empty
      *  results. Shared by the inline path, background revalidation, and pre-warm. */
@@ -690,7 +703,7 @@ class NyoraRestServer(
         filters: List<com.nyora.hasan72341.shared.extension.SourceFilter>,
         cacheKey: String?,
     ): String {
-        val service = facade.openExtension(source)
+        val service = openInstalled(source)
         // Mark search fetches so CloudflareInterceptor skips CF-solving (fail fast on
         // blocked sources) — a broad all-source search must never trigger a Chrome
         // storm. Covers concurrent fan-out via a counter.
@@ -744,7 +757,7 @@ class NyoraRestServer(
         val source = facade.listSources().firstOrNull { it.id == id }
             ?: return respondError(exchange, 404, "Unknown source: $id")
         try {
-            val service = facade.openExtension(source)
+            val service = openInstalled(source)
             val details = runBlocking { service.getDetails(url) }
             val manga = details.manga.copy(
                 source = com.nyora.hasan72341.shared.model.MangaSourceRef.Parser(source.id.removePrefix("parser:")),
@@ -780,7 +793,7 @@ class NyoraRestServer(
             }
         }
         try {
-            val service = facade.openExtension(source)
+            val service = openInstalled(source)
             val chapter = MangaChapter(id = url, title = url, url = url)
             val pages = runBlocking { service.getPageList(chapter) }
             // Cache the RAW pages (the loopback port changes per launch, so we
@@ -1189,7 +1202,7 @@ class NyoraRestServer(
                         gate.withPermit {
                             runCatching {
                                 kotlinx.coroutines.withTimeout(15_000L) {
-                                    val service = facade.openExtension(src)
+                                    val service = openInstalled(src)
                                     val page = service.search(query, page = 1)
                                     GlobalSearchGroup(
                                         sourceId = src.id,
@@ -1361,7 +1374,7 @@ class NyoraRestServer(
                     src.isInstalled && (src.name == sourceName || src.id.endsWith(":$sourceName"))
                 } ?: continue
                 runCatching {
-                    val service = facade.openExtension(source)
+                    val service = openInstalled(source)
                     val details = runBlocking { service.getDetails(manga.url.ifBlank { manga.id }) }
                     val count = details.chapters.size
                     val latestTitle = details.chapters.firstOrNull()?.title.orEmpty()
@@ -2045,7 +2058,7 @@ class NyoraRestServer(
         val source = facade.listSources().firstOrNull { it.id == id }
             ?: return respondError(exchange, 404, "Unknown source: $id")
         val descriptors = try {
-            facade.openExtension(source).getFilterList()
+            openInstalled(source).getFilterList()
         } catch (_: Exception) {
             emptyList()
         }
@@ -2166,7 +2179,7 @@ class NyoraRestServer(
             respondJson(exchange, 200, buildJsonObject { put("entries", kotlinx.serialization.json.JsonArray(emptyList())) })
             return
         }
-        val service = facade.openExtension(parserSource)
+        val service = openInstalled(parserSource)
         val list: List<com.nyora.hasan72341.shared.model.Manga> = try {
             kotlinx.coroutines.runBlocking { service.getPopular(page = 1).entries }
         } catch (_: Exception) {
@@ -2193,7 +2206,7 @@ class NyoraRestServer(
             .filter { it.isInstalled && it.engine == com.nyora.hasan72341.shared.model.SourceEngine.Parser }
         val results = mutableListOf<kotlinx.serialization.json.JsonElement>()
         for (src in sources) {
-            val service = facade.openExtension(src)
+            val service = openInstalled(src)
             val matches: List<com.nyora.hasan72341.shared.model.Manga> = try {
                 kotlinx.coroutines.runBlocking { service.search(query, page = 1).entries }
             } catch (_: Exception) {

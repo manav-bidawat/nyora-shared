@@ -112,7 +112,9 @@ fun buildOkHttpClient(settings: HelperNetworkSettings): OkHttpClient =
         // User-Agent (incl. a FlareSolverr-swapped one) and never override a
         // parser's own headers.
         .addInterceptor(BrowserHeadersInterceptor)
-        .connectTimeout(30, TimeUnit.SECONDS)
+        // Short connect timeout so dead/unreachable sources fail fast (a broad
+        // all-source search must not hang 30s per dead host). Env-tunable.
+        .connectTimeout(System.getenv("NYORA_CONNECT_TIMEOUT")?.toLongOrNull() ?: 8, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .callTimeout(120, TimeUnit.SECONDS)
         .applyNetworkSettings(settings)
