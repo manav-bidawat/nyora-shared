@@ -90,6 +90,13 @@ class NyoraRestServer(
     }
     private var server: HttpServer? = null
 
+    // Background workers for serve-stale-while-revalidate + startup pre-warm, so
+    // users never wait on a cold upstream fetch. Daemon so they never block exit.
+    private val backgroundExecutor = Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "nyora-revalidate").apply { isDaemon = true }
+    }
+    private val revalidating = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     val baseUrl: String
         get() = server?.address?.let { "http://${it.address.hostAddress}:${it.port}" }.orEmpty()
 
@@ -180,7 +187,28 @@ class NyoraRestServer(
             start()
         }
         server = httpServer
+        prewarmCache()
         return baseUrl
+    }
+
+    /** Pre-warm the browse cache for installed sources in the background right
+     *  after startup, so the very first user request is already instant (no cold
+     *  fetch). Cheap, bounded, best-effort; failures are ignored. Skips keys the
+     *  persistent snapshot already restored. Disable with NYORA_PREWARM=0. */
+    private fun prewarmCache() {
+        if (System.getenv("NYORA_PREWARM") == "0") return
+        backgroundExecutor.execute {
+            try {
+                val sources = try { facade.listSources().filter { it.isInstalled } } catch (_: Throwable) { emptyList() }
+                for (source in sources.take(40)) {
+                    for (mode in listOf(BrowseMode.POPULAR, BrowseMode.LATEST)) {
+                        val key = "browse:${mode.name}:${source.id}:1:"
+                        if (ResponseCache.get(key) != null) continue // snapshot already warm + fresh
+                        try { fetchBrowseBody(source, mode, 1, "", emptyList(), key) } catch (_: Throwable) { /* skip */ }
+                    }
+                }
+            } catch (_: Throwable) { /* best-effort */ }
+        }
     }
 
     fun stop() {
@@ -615,35 +643,69 @@ class NyoraRestServer(
         // otherwise bottleneck cached hits. Popular/Latest are identical for every
         // user; Search is query/user-specific → never cached.
         val cacheKey = if (mode != BrowseMode.SEARCH) "browse:${mode.name}:$id:$page:${params["f"].orEmpty()}" else null
-        if (cacheKey != null) ResponseCache.get(cacheKey)?.let { respondJsonRaw(exchange, 200, it); return }
+        // Serve-stale-while-revalidate: any cached copy (even expired) is returned
+        // INSTANTLY so the user never waits on a cold upstream fetch; a stale copy
+        // triggers a background refresh. Only a truly-never-seen key fetches inline.
+        if (cacheKey != null) {
+            ResponseCache.peek(cacheKey)?.let { hit ->
+                respondJsonRaw(exchange, 200, hit.value)
+                if (hit.stale) revalidateBrowse(cacheKey, id, mode, page, params["f"])
+                return
+            }
+        }
         val source = facade.listSources().firstOrNull { it.id == id }
             ?: return respondError(exchange, 404, "Unknown source: $id")
-        // Filters are passed as a URL-encoded JSON array in the 'f' parameter:
-        //   [{"name":"Genre","type":"select","selectedIndex":2}, …]
         val filters = parseFilters(params["f"])
         try {
-            val service = facade.openExtension(source)
-            val result = runBlocking {
-                when (mode) {
-                    BrowseMode.POPULAR -> service.getPopular(page)
-                    BrowseMode.LATEST -> service.getLatest(page)
-                    BrowseMode.SEARCH -> service.search(params["q"].orEmpty(), page, filters)
-                }
-            }
-            val body = json.encodeToString(
-                BrowseResponse.serializer(),
-                BrowseResponse(
-                    entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
-                    hasNextPage = result.hasNextPage,
-                ),
-            )
-            // only cache successful, non-empty pages (don't cache flukes/empties)
-            if (cacheKey != null && result.entries.isNotEmpty()) {
-                ResponseCache.put(cacheKey, body, 600_000) // 10 min
-            }
+            val body = fetchBrowseBody(source, mode, page, params["q"].orEmpty(), filters, cacheKey)
             respondJsonRaw(exchange, 200, body)
         } catch (error: Exception) {
             respondError(exchange, 500, error.message ?: "Browse failed")
+        }
+    }
+
+    /** Fetch a browse page from the source, serialize it, and cache non-empty
+     *  results. Shared by the inline path, background revalidation, and pre-warm. */
+    private fun fetchBrowseBody(
+        source: MangaSource,
+        mode: BrowseMode,
+        page: Int,
+        query: String,
+        filters: List<com.nyora.hasan72341.shared.extension.SourceFilter>,
+        cacheKey: String?,
+    ): String {
+        val service = facade.openExtension(source)
+        val result = runBlocking {
+            when (mode) {
+                BrowseMode.POPULAR -> service.getPopular(page)
+                BrowseMode.LATEST -> service.getLatest(page)
+                BrowseMode.SEARCH -> service.search(query, page, filters)
+            }
+        }
+        val body = json.encodeToString(
+            BrowseResponse.serializer(),
+            BrowseResponse(
+                entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
+                hasNextPage = result.hasNextPage,
+            ),
+        )
+        if (cacheKey != null && result.entries.isNotEmpty()) {
+            ResponseCache.put(cacheKey, body, 600_000) // 10 min fresh window
+        }
+        return body
+    }
+
+    /** Refresh a stale browse entry in the background so the NEXT request is fresh
+     *  — the current request already got an instant (stale) response. */
+    private fun revalidateBrowse(cacheKey: String, id: String, mode: BrowseMode, page: Int, filtersParam: String?) {
+        if (!revalidating.add(cacheKey)) return // one refresh at a time per key
+        backgroundExecutor.execute {
+            try {
+                val source = facade.listSources().firstOrNull { it.id == id } ?: return@execute
+                fetchBrowseBody(source, mode, page, "", parseFilters(filtersParam), cacheKey)
+            } catch (_: Throwable) { /* keep the stale copy on failure */ } finally {
+                revalidating.remove(cacheKey)
+            }
         }
     }
 
