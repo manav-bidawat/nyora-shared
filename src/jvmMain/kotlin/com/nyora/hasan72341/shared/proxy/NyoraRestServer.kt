@@ -197,18 +197,26 @@ class NyoraRestServer(
      *  persistent snapshot already restored. Disable with NYORA_PREWARM=0. */
     private fun prewarmCache() {
         if (System.getenv("NYORA_PREWARM") == "0") return
-        backgroundExecutor.execute {
+        // ONE low-priority background thread, SEQUENTIAL with a gap between fetches
+        // so it never spikes CPU on the small box. Skips any key that already has a
+        // cached copy (fresh OR stale) — serve-stale-while-revalidate refreshes
+        // those lazily on demand, so after the first snapshot this is a near no-op.
+        val t = Thread({
             try {
                 val sources = try { facade.listSources().filter { it.isInstalled } } catch (_: Throwable) { emptyList() }
                 for (source in sources.take(40)) {
                     for (mode in listOf(BrowseMode.POPULAR, BrowseMode.LATEST)) {
                         val key = "browse:${mode.name}:${source.id}:1:"
-                        if (ResponseCache.get(key) != null) continue // snapshot already warm + fresh
+                        if (ResponseCache.peek(key) != null) continue // already cached — leave it to serve-stale
                         try { fetchBrowseBody(source, mode, 1, "", emptyList(), key) } catch (_: Throwable) { /* skip */ }
+                        try { Thread.sleep(400) } catch (_: InterruptedException) { return@Thread } // gentle pacing
                     }
                 }
             } catch (_: Throwable) { /* best-effort */ }
-        }
+        }, "nyora-prewarm")
+        t.isDaemon = true
+        t.priority = Thread.MIN_PRIORITY
+        t.start()
     }
 
     fun stop() {
