@@ -82,6 +82,13 @@ class NyoraRestServer(
     // parties); harmless for the same-origin desktop/localhost helper. Set
     // NYORA_CORS=0 to disable.
     private val corsEnabled: Boolean = System.getenv("NYORA_CORS") != "0",
+    // Source-availability gate. When this returns false, all source/content
+    // endpoints respond as if no sources exist — so nothing can be listed,
+    // browsed, or fetched (even by a direct localhost probe) until a caller
+    // flips it on. Defaults to always-on, so the hosted web helper and the
+    // mac/linux desktop apps are unaffected; the Windows app supplies a real
+    // gate backed by its signed source-repository state.
+    private val sourcesEnabled: () -> Boolean = { true },
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -104,19 +111,22 @@ class NyoraRestServer(
             createContext("/openapi.yaml") { handleOpenApiSpec(it) }
             createContext("/device/relay/poll") { handleDeviceRelayPoll(it) }
             createContext("/device/relay/result") { handleDeviceRelayResult(it) }
-            createContext("/sources/refresh") { handleRefresh(it) }
-            createContext("/sources/catalog") { handleCatalog(it) }
-            createContext("/sources/install") { handleInstall(it) }
-            createContext("/sources/uninstall") { handleUninstall(it) }
-            createContext("/sources/pin") { handlePin(it) }
-            createContext("/sources/filters") { handleFilters(it) }
-            createContext("/sources/popular") { handleBrowse(it, BrowseMode.POPULAR) }
-            createContext("/sources/latest") { handleBrowse(it, BrowseMode.LATEST) }
-            createContext("/sources/search") { handleBrowse(it, BrowseMode.SEARCH) }
+            // Source/content endpoints are gated: when sourcesEnabled() is false
+            // they behave as if no sources exist, so nothing is listable/browsable/
+            // fetchable even via a direct localhost probe.
+            createContext("/sources/refresh") { gatedSource(it) { handleRefresh(it) } }
+            createContext("/sources/catalog") { gatedSource(it) { handleCatalog(it) } }
+            createContext("/sources/install") { gatedSource(it) { handleInstall(it) } }
+            createContext("/sources/uninstall") { gatedSource(it) { handleUninstall(it) } }
+            createContext("/sources/pin") { gatedSource(it) { handlePin(it) } }
+            createContext("/sources/filters") { gatedSource(it) { handleFilters(it) } }
+            createContext("/sources/popular") { gatedSource(it) { handleBrowse(it, BrowseMode.POPULAR) } }
+            createContext("/sources/latest") { gatedSource(it) { handleBrowse(it, BrowseMode.LATEST) } }
+            createContext("/sources/search") { gatedSource(it) { handleBrowse(it, BrowseMode.SEARCH) } }
             createContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
-            createContext("/sources") { handleSources(it) }
-            createContext("/manga/details") { handleDetails(it) }
-            createContext("/manga/pages") { handlePages(it) }
+            createContext("/sources") { gatedSource(it) { handleSources(it) } }
+            createContext("/manga/details") { gatedSource(it) { handleDetails(it) } }
+            createContext("/manga/pages") { gatedSource(it) { handlePages(it) } }
             createContext("/image") { handleImage(it) }
             createContext("/library/history/record") { handleHistoryRecord(it) }
             createContext("/library/history/remove") { handleHistoryRemove(it) }
@@ -372,6 +382,21 @@ class NyoraRestServer(
 
     private fun getJsSources(): List<com.nyora.hasan72341.shared.model.MangaSource> =
         com.nyora.hasan72341.shared.extension.nativeParserCatalog()
+
+    /** Run [handler] only when sources are enabled; else respond as if empty. */
+    private fun gatedSource(exchange: HttpExchange, handler: (HttpExchange) -> Unit) {
+        if (sourcesEnabled()) handler(exchange) else respondNoSources(exchange)
+    }
+
+    /** Neutral "no sources" response — reveals nothing about the built-in catalog. */
+    private fun respondNoSources(exchange: HttpExchange) {
+        respondJson(exchange, 200, buildJsonObject {
+            putJsonArray("entries") {}
+            putJsonArray("sources") {}
+            putJsonArray("manga") {}
+            put("hasNext", false)
+        })
+    }
 
     private fun handleCatalog(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
