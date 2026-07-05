@@ -413,6 +413,7 @@ class NyoraRestServer(
                 contentType = source.contentType.name,
                 isBroken = false,
                 isInstalled = source.id in installed,
+                isNsfw = source.isNsfw,
             )
         }
         val body = json.encodeToString(CatalogResponse.serializer(), CatalogResponse(entries))
@@ -2695,6 +2696,7 @@ private data class CatalogEntry(
     val contentType: String,
     val isBroken: Boolean,
     val isInstalled: Boolean,
+    val isNsfw: Boolean = false,
 )
 
 @kotlinx.serialization.Serializable
