@@ -13,7 +13,6 @@ The open-source, cross-platform Kotlin engine that powers **Translate**, **Sourc
 ![Kotlin](https://img.shields.io/badge/Kotlin-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
 ![Gradle](https://img.shields.io/badge/Gradle-02303A?style=for-the-badge&logo=gradle&logoColor=white)
 ![SQLDelight](https://img.shields.io/badge/SQLDelight-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
-![Supabase](https://img.shields.io/badge/Supabase-3FCF8E?style=for-the-badge&logo=supabase&logoColor=black)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Kotlin Multiplatform](https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF.svg?logo=kotlin&logoColor=white)
@@ -26,7 +25,7 @@ The open-source, cross-platform Kotlin engine that powers **Translate**, **Sourc
 </div>
 
 > [!NOTE]
-> **This repository is open source (Apache-2.0) and public.** It is the shared Kotlin engine behind the Nyora desktop apps, vendored by each of them as a git submodule. Anyone can clone it, build it, and contribute — the desktop apps build fully from scratch with the submodule included. Contributions to the engine (parser runtime, loopback REST server, SQLDelight store, Supabase sync, downloads manager) are welcome via pull request; see [Contributing](#contributing).
+> **This repository is open source (Apache-2.0) and public.** It is the shared Kotlin engine behind the Nyora desktop apps, vendored by each of them as a git submodule. Anyone can clone it, build it, and contribute — the desktop apps build fully from scratch with the submodule included. Contributions to the engine (parser runtime, loopback REST server, SQLDelight store, Nyora Cloud sync, downloads manager) are welcome via pull request; see [Contributing](#contributing).
 
 ---
 
@@ -51,7 +50,7 @@ The engine exists so the macOS, Windows and Linux front ends never reimplement t
 | Pillar | Delivered here | What the desktop app adds |
 |---|---|---|
 | **Sources** | Parser runtime, OTA bundle updates, REST catalogue API | Native browse / search / reader UI |
-| **Sync** | `SupabaseConfig`, Google sign-in, per-row sync client | Account UI and sign-in trigger |
+| **Sync** | Nyora Cloud client (self-hosted, email + password, JWT), per-row sync | Account UI and sign-in trigger |
 | **Download** | Offline chapter downloads manager | Download UI, storage location |
 | **Translate** | Shared source + runtime the per-platform engine sits on | The actual whole-page AI translation engine |
 
@@ -66,7 +65,7 @@ The engine exists so the macOS, Windows and Linux front ends never reimplement t
   - [Sources — Parser Runtime](#sources--parser-runtime)
   - [NyoraRestServer — Loopback API](#nyorarestserver--loopback-api)
   - [Library & History Store](#library--history-store)
-  - [Sync — Supabase Cloud Sync](#sync--supabase-cloud-sync)
+  - [Sync — Nyora Cloud Sync](#sync--nyora-cloud-sync)
   - [Download — Downloads Manager](#download--downloads-manager)
   - [Bootstrap](#bootstrap)
 - [Capability Matrix](#capability-matrix)
@@ -115,7 +114,7 @@ The Kotatsu parser engine running on a **GraalVM JavaScript** runtime, with **ov
 
 An in-process **loopback REST API** that the Compose / SwiftUI front ends talk to over localhost.
 
-- **Surface.** Exposes catalogue, search, details and an image proxy, plus endpoints for the library (favourites, categories, history, bookmarks, updates), manga prefs, downloads, local (offline) chapters, OTA status, Supabase sync, backup import/export, and `/health`.
+- **Surface.** Exposes catalogue, search, details and an image proxy, plus endpoints for the library (favourites, categories, history, bookmarks, updates), manga prefs, downloads, local (offline) chapters, OTA status, Nyora Cloud sync, backup import/export, and `/health`.
 - **Loopback bind.** The server binds to the loopback address on an ephemeral port (`0`) by default, exactly as the desktop clients expect; the resolved port is written to a per-OS port file the native launcher reads. The web build can instead pin a fixed port.
 - **Why loopback.** The native UI layers (SwiftUI on macOS, Compose on Windows/Linux) talk to the engine over `localhost` HTTP rather than via in-language FFI. Every front end gets the same stable contract regardless of UI toolkit or language, and the parser/runtime stays isolated from the UI process model.
 - **Image proxy.** Page and cover images are fetched through the engine's proxy, so source-specific headers, referrers and cookies (including Cloudflare clearance) apply consistently and the UI only ever requests a local URL.
@@ -128,14 +127,14 @@ A **SQLDelight** database holding the user's reading state, shared across apps.
 - **Logic.** Includes the dedup / migration logic shared across apps, plus a one-time JSON → SQL migration, so the same schema and upgrade paths apply on every desktop platform.
 - **Type-safe access.** SQLDelight generates type-safe Kotlin from SQL, giving the engine compile-time-checked queries and a single canonical schema the sync layer maps onto.
 
-### Sync — Supabase Cloud Sync
+### Sync — Nyora Cloud Sync
 
-`SupabaseConfig` + sync client providing free cloud sync across devices.
+A sync client (legacy class name `SupabaseConfig`) providing free cloud sync across devices via Nyora Cloud.
 
-- **Sign-in.** **Google sign-in** via a loopback OAuth flow that exchanges into Supabase using `signInWithIdToken`.
+- **Sign-in.** **Email + password** accounts on Nyora Cloud — a self-hosted FastAPI backend (OAuth2 password flow, JWT).
 - **What syncs.** **Per-row sync** of library, favourites, categories and history, so reading state follows the user across devices and platforms.
 - **Lifecycle.** When configured and authenticated, `bootstrap()` refreshes the token and runs an initial pull on a background daemon thread; thereafter the client reconciles changes per row. `restore-from-cloud` can re-seed a fresh install.
-- **Bundled config.** Ships with bundled production config defaults — including the Google desktop (installed-app) OAuth client identifiers — so the desktop apps sync out of the box. These are overridable by a local `.env.sync`, letting contributors point sync at their own Supabase project (see [Configuration](#configuration)).
+- **Bundled config.** Ships with the Nyora Cloud backend URL as a bundled default, so the desktop apps sync out of the box. It is overridable by a local `.env.sync`, letting contributors point sync at their own self-hosted Nyora Cloud backend (see [Configuration](#configuration)).
 
 ### Download — Downloads Manager
 
@@ -150,7 +149,7 @@ A download manager for offline chapters, backing the desktop **Download** pillar
 - a background OTA parser update check,
 - network configuration and the GraalVM parser runtime,
 - the downloads manager,
-- and the Supabase sync client.
+- and the Nyora Cloud sync client.
 
 After `bootstrap()` completes the engine is fully initialised. `HelperMain.main()` then starts `NyoraRestServer`, writes the port file, and arms a parent-PID watchdog so the helper exits cleanly if its launcher dies.
 
@@ -165,7 +164,7 @@ What this engine delivers, and where the work actually lives. Cells marked **Eng
 | Loopback REST API | Engine | Catalogue, search, details, image proxy, library, downloads, sync |
 | Image proxy | Engine | Applies source headers / referrers / Cloudflare clearance |
 | Local store (SQLDelight) | Engine | Favourites, categories, history, bookmarks, prefs |
-| Cloud sync (Supabase) | Engine | Google sign-in, per-row sync, cloud restore |
+| Cloud sync (Nyora Cloud) | Engine | Email + password, per-row sync, cloud restore |
 | Offline downloads | Engine | Enqueue / start / cancel, local serving |
 | Backup import / export | Engine | Loopback endpoints |
 | Whole-page AI translation | App | Per-platform engine consumes pages from this runtime |
@@ -192,7 +191,7 @@ At a high level, every Nyora desktop app is a thin native UI shell over this sha
 │        ├── Parser runtime (GraalVM JS) ── OTA parser bundles   │
 │        ├── SQLDelight store ── library · categories · history  │
 │        ├── Downloads manager ── offline chapters               │
-│        └── Supabase sync ── Google sign-in · per-row sync      │
+│        └── Nyora Cloud sync ── email+password · per-row        │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -201,7 +200,7 @@ Flow of control:
 1. The desktop helper JAR calls `HelperMain.bootstrap()`, which opens the database, runs migrations, seeds the catalogue, kicks off a background OTA check, configures networking and prepares the sync client.
 2. `NyoraRestServer` starts on a loopback address (ephemeral port) and exposes the catalogue, search, details, image-proxy, library, downloads and sync endpoints.
 3. The native UI talks to that loopback API. A source listing or page request is served by the GraalVM-backed parser runtime; images return through the engine's proxy.
-4. Reading state (favourites, categories, history, progress) is persisted to the SQLDelight store and reconciled with Supabase per row once the user is signed in with Google.
+4. Reading state (favourites, categories, history, progress) is persisted to the SQLDelight store and reconciled with Nyora Cloud per row once the user is signed in (email + password).
 5. The desktop app's own translation engine consumes pages from the engine and renders the whole-page AI translation typeset over the art.
 
 Because all three desktop apps embed the **same submodule commit**, this entire layer behaves identically across macOS, Windows and Linux.
@@ -220,7 +219,7 @@ A quick orientation map for landing in the tree for the first time. Source is sp
 | REST server | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/proxy` | `NyoraRestServer`, endpoints, image proxy |
 | Network config | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/net` | `HelperNetworkSettings` and network configuration |
 | Downloads | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/download` | Offline chapter download manager |
-| Sync | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/sync` | `SupabaseConfig`, Google sign-in, per-row sync |
+| Sync | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/sync` | Nyora Cloud client (`SupabaseConfig`, legacy name), email + password, per-row sync |
 | Engine entry point | `src/jvmMain/kotlin/com/nyora/hasan72341/shared/HelperMain.kt` | `bootstrap()` + `main()`, the wiring root |
 | Bundled parsers | `src/commonMain/resources` | `parsers.bundle.js`, `parsers_sources.json` |
 
@@ -233,7 +232,7 @@ This is the open-source engine that powers the Nyora desktop apps, and contribut
 **Where to make a change.**
 
 - A broken or new **source** is almost always a parser-bundle / catalogue concern — see the parser runtime and the bundled `resources`. New sources ride in via OTA bundles, so most source work does not require an engine release at all.
-- A **sync** or **auth** change touches `sync/` and `SupabaseConfig`; point your own environment at a local `.env.sync` rather than editing bundled defaults (see [Configuration](#configuration)).
+- A **sync** or **auth** change touches `sync/` and `SupabaseConfig` (the Nyora Cloud client); point your own environment at a local `.env.sync` rather than editing bundled defaults (see [Configuration](#configuration)).
 - A **schema** change means a `.sq` edit plus a migration; the store is shared by every client, so treat migrations as one-way and forward-compatible.
 - An **API** change ripples into all three native UIs over the loopback contract; keep endpoint shapes stable and additive where you can.
 
@@ -274,12 +273,11 @@ Notes:
 ![Kotlin](https://img.shields.io/badge/Kotlin-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
 ![Gradle](https://img.shields.io/badge/Gradle-02303A?style=for-the-badge&logo=gradle&logoColor=white)
 ![SQLDelight](https://img.shields.io/badge/SQLDelight-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
-![Supabase](https://img.shields.io/badge/Supabase-3FCF8E?style=for-the-badge&logo=supabase&logoColor=black)
 
 - **Kotlin (Multiplatform / JVM)** — the engine is written as `commonMain` + `jvmMain` source, compiled into each desktop app's build.
 - **Gradle** — each consuming app's thin `:shared` module compiles this repository's `src/` via `srcDirs`.
 - **SQLDelight** — type-safe local store for favourites, categories, reading history and progress, with shared migration logic.
-- **Supabase** — backs free cloud sync: Google sign-in (loopback OAuth → `signInWithIdToken`) and per-row sync of library state.
+- **Nyora Cloud** — a self-hosted FastAPI backend that backs free cloud sync: email + password accounts (OAuth2 + JWT) and per-row sync of library state.
 - **GraalVM JavaScript** — the runtime that executes Kotatsu-style source parsers on the JVM desktop.
 
 ## Nyora on Every Platform
@@ -309,7 +307,7 @@ Honest, already-implied directions for the engine — no dates, no promises:
 No. `nyora-shared` is a Kotlin source library consumed as a git submodule by the desktop apps. There is no standalone download or `main()` you launch to "get Nyora" — install a desktop client from [Nyora on Every Platform](#nyora-on-every-platform) instead.
 
 **Can I contribute to this repo?**
-Yes. The engine is open source (Apache-2.0) and public, and pull requests are welcome — parser fixes, REST endpoints, sync, store and downloads work all land here. Build it through a consuming desktop app's submodule, point sync at your own Supabase via `.env.sync`, and open a PR. See [Contributing](#contributing). Source porting in the public [`nyora-ios`](https://github.com/Hasan72341/nyora-ios) repo is another high-leverage place to help.
+Yes. The engine is open source (Apache-2.0) and public, and pull requests are welcome — parser fixes, REST endpoints, sync, store and downloads work all land here. Build it through a consuming desktop app's submodule, point sync at your own Nyora Cloud backend via `.env.sync`, and open a PR. See [Contributing](#contributing). Source porting in the public [`nyora-ios`](https://github.com/Hasan72341/nyora-ios) repo is another high-leverage place to help.
 
 **Is Nyora free, with ads or tracking?**
 Nyora is free, ad-free and has no trackers, and you never need an account just to read. This repository is the engine that keeps that true on desktop.
@@ -318,7 +316,7 @@ Nyora is free, ad-free and has no trackers, and you never need an account just t
 The engine connects to hundreds of online sources via Kotatsu/Tachiyomi-style parsers. Nyora is a reader, not a host, and is **not affiliated** with any of the sources it can access.
 
 **What does cloud sync store, and is it private?**
-Sync is optional and free. When a user signs in with Google, the engine reconciles their library, favourites, categories and history per row through Supabase. It is reading state, not page content; signing in is never required to read.
+Sync is optional and free. When a user signs in (email + password), the engine reconciles their library, favourites, categories and history per row through Nyora Cloud. It is reading state, not page content; signing in is never required to read.
 
 **Does the engine work offline?**
 Yes. The downloads manager stores chapter pages locally and serves them back through the loopback API, so saved chapters read with no connection.
@@ -330,7 +328,7 @@ Via OTA parser bundles. `bootstrap()` checks a versioned manifest in the backgro
 The engine does **not** translate. It serves pages and images; each desktop app's own per-platform engine performs the whole-page AI translation on top of this runtime.
 
 **Is the engine open-source?**
-Yes. `nyora-shared` is licensed under the **Apache License 2.0** and is a public repository — clone it, build it, and send pull requests. Sync configuration and secrets are handled via local `.env.sync` overrides; the bundled defaults are production conveniences, and the bundled Google OAuth client is a desktop (installed-app) client whose secret is non-confidential by Google's design. See [Configuration](#configuration).
+Yes. `nyora-shared` is licensed under the **Apache License 2.0** and is a public repository — clone it, build it, and send pull requests. Sync configuration is handled via local `.env.sync` overrides; the bundled default is just the Nyora Cloud backend URL, and accounts use email + password (no third-party OAuth client). See [Configuration](#configuration).
 
 **How do the desktop apps run JVM code?**
 Each consuming app bundles a JRE and runs the engine as a loopback helper, so users do not need a separate Java install.
@@ -339,10 +337,10 @@ Each consuming app bundles a JRE and runs the engine as a loopback helper, so us
 
 The engine ships with **bundled production defaults** so the desktop apps sync out of the box, and lets contributors override everything locally.
 
-- **Bundled defaults.** `SupabaseConfig` carries bundled production Supabase config and a **Google desktop (installed-app) OAuth client**. Installed-app OAuth secrets are embedded in distributed applications and are **non-confidential by Google's design** — they are not treated as secret — so shipping them in an open repository is acceptable.
-- **Local overrides.** A local `.env.sync` overrides the bundled values, so a contributor can point sync at **their own Supabase project** and their own OAuth client during development without touching committed defaults.
-- **Where it lives.** Sync configuration is in `src/jvmMain/kotlin/com/nyora/hasan72341/shared/sync` (`SupabaseConfig`, Google sign-in, per-row sync).
-- **Hygiene.** If a bundled credential is ever misused or you suspect exposure, rotate the OAuth client and Supabase keys and update the `SupabaseConfig` defaults accordingly. Never commit per-developer secrets — keep those in your local `.env.sync`.
+- **Bundled defaults.** `SupabaseConfig` (a legacy class name) carries the bundled Nyora Cloud backend URL. Accounts are email + password against the self-hosted FastAPI backend, so there is no bundled third-party OAuth client secret to worry about.
+- **Local overrides.** A local `.env.sync` overrides the bundled values, so a contributor can point sync at **their own self-hosted Nyora Cloud backend** during development without touching committed defaults.
+- **Where it lives.** Sync configuration is in `src/jvmMain/kotlin/com/nyora/hasan72341/shared/sync` (`SupabaseConfig`, the Nyora Cloud client; email + password; per-row sync).
+- **Hygiene.** If a bundled value is ever misused or you suspect exposure, rotate the Nyora Cloud credentials and update the `SupabaseConfig` defaults accordingly. Never commit per-developer secrets — keep those in your local `.env.sync`.
 
 ## License
 
