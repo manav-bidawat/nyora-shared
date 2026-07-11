@@ -630,8 +630,16 @@ class NyoraRestServer(
      * blank). Any per-page headers the parser emitted are forwarded too.
      */
     private fun proxyPageUrl(page: MangaPage, sourceBaseUrl: String): MangaPage {
-        val c = page.url.trim()
-        if (c.isEmpty() || c.startsWith("data:")) return page
+        val raw = page.url.trim()
+        if (raw.isEmpty() || raw.startsWith("data:")) return page
+        // Absolutize a relative image path (some Madara sites like MangaEclipse
+        // return /wp-content/… ; already-cached pages may still hold relative
+        // paths) against the source base URL so /image?u= receives a real URL.
+        val c = when {
+            raw.startsWith("//") -> "https:$raw"
+            raw.startsWith("/") && sourceBaseUrl.isNotBlank() -> sourceBaseUrl.trimEnd('/') + raw
+            else -> raw
+        }
         val port = server?.address?.port ?: return page
         val base = "http://127.0.0.1:$port"
         if (c.startsWith("$base/image")) return page

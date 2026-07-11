@@ -14,6 +14,7 @@ import org.koitharu.kotatsu.parsers.model.MangaChapter as LibMangaChapter
 import org.koitharu.kotatsu.parsers.model.MangaListFilter
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 
 /**
  * MangaExtensionService backed by a native kotatsu-parsers-redo [org.koitharu.kotatsu.parsers.MangaParser].
@@ -85,7 +86,11 @@ class KotatsuParserExtensionService(
         )
         return parser.getPages(libChapter).map { page ->
             val resolved = page.url.ifBlank { parser.getPageUrl(page) }
-            MangaPage(url = resolved)
+            // Some parsers (e.g. MangaEclipse and other Madara sites) return a
+            // relative image path like /wp-content/uploads/… — absolutize it
+            // against the source domain so pages actually load. No-op when the
+            // URL is already absolute, and no extra per-page network request.
+            MangaPage(url = resolved.toAbsoluteUrl(parser.domain))
         }
     }
 
