@@ -112,6 +112,9 @@ fun buildOkHttpClient(settings: HelperNetworkSettings): OkHttpClient =
         // User-Agent (incl. a FlareSolverr-swapped one) and never override a
         // parser's own headers.
         .addInterceptor(BrowserHeadersInterceptor)
+        // The *Lib family's API (api.cdnlibs.org) now 404s without a browser
+        // Origin/Referer; add them so MangaLib/HentaiLib/… open again.
+        .addInterceptor(LibApiHeadersInterceptor)
         // Short connect timeout so dead/unreachable sources fail fast (a broad
         // all-source search must not hang 30s per dead host). Env-tunable.
         .connectTimeout(System.getenv("NYORA_CONNECT_TIMEOUT")?.toLongOrNull() ?: 8, TimeUnit.SECONDS)
