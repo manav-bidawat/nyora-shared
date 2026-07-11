@@ -5,6 +5,7 @@ import com.nyora.hasan72341.shared.net.NYORA_BROWSER_UA
 import com.nyora.hasan72341.shared.net.buildOkHttpClient
 import com.nyora.hasan72341.shared.net.sharedCookieJar
 import okhttp3.CookieJar
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -32,7 +33,42 @@ class KotatsuLoaderContext(
     private val networkConfig: HelperNetworkConfig,
 ) : MangaLoaderContext() {
 
-    override val httpClient: OkHttpClient by lazy { buildOkHttpClient(networkConfig.snapshot()) }
+    // kotatsu-parsers' AbstractMangaParser implements okhttp3.Interceptor and expects
+    // the host to apply it (parsers override intercept() to add per-request headers —
+    // e.g. the *Lib family sets Site-Id/Authorization there). But OkHttpWebClient uses
+    // context.httpClient directly and never adds the parser, so those headers were
+    // silently dropped (which broke MangaLib/HentaiLib once cdnlibs began requiring
+    // Site-Id). We splice a delegating interceptor that runs the bound parser's
+    // intercept() at request time; KotatsuParserExtensionService binds it right after
+    // the parser is constructed. Default AbstractMangaParser.intercept() is a no-op
+    // passthrough, so binding any parser is safe.
+    @Volatile
+    private var parserInterceptor: Interceptor? = null
+
+    fun bindParser(instance: Any?) {
+        // newParserInstance returns a MangaParserWrapper whose own intercept() only
+        // merges getRequestHeaders() and never calls the wrapped parser's intercept()
+        // override — which is where the *Lib family sets Site-Id/Authorization. Unwrap
+        // to the real delegate so its intercept() actually runs.
+        parserInterceptor = unwrapDelegate(instance) as? Interceptor
+    }
+
+    private fun unwrapDelegate(instance: Any?): Any? {
+        if (instance == null) return null
+        return try {
+            val field = instance.javaClass.getDeclaredField("delegate")
+            field.isAccessible = true
+            field.get(instance) ?: instance
+        } catch (_: Throwable) {
+            instance
+        }
+    }
+
+    override val httpClient: OkHttpClient by lazy {
+        buildOkHttpClient(networkConfig.snapshot()).newBuilder()
+            .addInterceptor(Interceptor { chain -> parserInterceptor?.intercept(chain) ?: chain.proceed(chain.request()) })
+            .build()
+    }
 
     override val cookieJar: CookieJar
         get() = sharedCookieJar

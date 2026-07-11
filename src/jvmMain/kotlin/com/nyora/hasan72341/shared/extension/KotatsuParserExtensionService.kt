@@ -30,7 +30,9 @@ class KotatsuParserExtensionService(
         ?: error("Unknown native parser source: $parserName")
 
     private val context = KotatsuLoaderContext(networkConfig)
-    private val parser = context.newParserInstance(parserSource)
+    // Bind the parser so its own Interceptor (per-request headers like the *Lib
+    // family's Site-Id/Authorization) is applied to the client it uses.
+    private val parser = context.newParserInstance(parserSource).also { context.bindParser(it) }
 
     override val supportsLatest: Boolean
         get() = SortOrder.UPDATED in parser.availableSortOrders
