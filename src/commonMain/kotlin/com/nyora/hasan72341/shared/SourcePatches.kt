@@ -38,6 +38,7 @@ object SourcePatches {
         "MANGATILKISI" to "Tilki Scans",
         "ISEKAISCAN_EU" to "IsekaiScan",
         "YUGEN_MANGAS_ES" to "Visual Ikigai",
+        "TOONILY_ME" to "ToonDex", // rebranded toonily.me → toondex.io (native ToonDexExtensionService)
     )
 
     val DEAD_SOURCES: Set<String> = setOf(

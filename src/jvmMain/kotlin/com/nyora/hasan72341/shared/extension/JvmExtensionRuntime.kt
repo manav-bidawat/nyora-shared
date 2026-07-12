@@ -15,10 +15,12 @@ class JvmExtensionRuntime(
             // kotatsu-parsers-redo MangaFire (old /filter HTML + vrf + scrambling)
             // now returns 0 results, so serve it from a native app-layer service.
             // Every MANGAFIRE_* language source (parser:MANGAFIRE_EN/ES/…) routes here.
-            if (source.id.startsWith("parser:MANGAFIRE")) {
-                MangaFireExtensionService(source, networkConfig)
-            } else {
-                KotatsuParserExtensionService(source, networkConfig = networkConfig)
+            when {
+                source.id.startsWith("parser:MANGAFIRE") -> MangaFireExtensionService(source, networkConfig)
+                // Toonily.me → toondex.io: rebuilt on the MangaBuddy JSON API (api.toondex.io);
+                // the kotatsu Madtheme parser no longer matches. Serve natively.
+                source.id == "parser:TOONILY_ME" -> ToonDexExtensionService(source, networkConfig)
+                else -> KotatsuParserExtensionService(source, networkConfig = networkConfig)
             }
         }
 
