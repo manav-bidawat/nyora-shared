@@ -1,5 +1,6 @@
 package com.nyora.hasan72341.shared.extension
 
+import com.nyora.hasan72341.shared.SourcePatches
 import com.nyora.hasan72341.shared.net.HelperNetworkConfig
 import com.nyora.hasan72341.shared.net.NYORA_BROWSER_UA
 import com.nyora.hasan72341.shared.net.buildOkHttpClient
@@ -75,7 +76,7 @@ class KotatsuLoaderContext(
 
     override fun getDefaultUserAgent(): String = NYORA_BROWSER_UA
 
-    override fun getConfig(source: LibMangaSource): MangaSourceConfig = DefaultSourceConfig
+    override fun getConfig(source: LibMangaSource): MangaSourceConfig = OverrideSourceConfig(source)
 
     // JS evaluation intentionally unsupported — GraalVM/Truffle was dropped to keep the
     // hosted helper small (<500 MB) and fast to start. Only ~12 obfuscated sources call
@@ -92,8 +93,19 @@ class KotatsuLoaderContext(
     override fun createBitmap(width: Int, height: Int): Bitmap =
         throw UnsupportedOperationException("Bitmap descrambling is not supported on this JVM host")
 
-    /** A config that always returns each key's compiled-in default (e.g. the source's primary domain). */
-    private object DefaultSourceConfig : MangaSourceConfig {
-        override fun <T> get(key: ConfigKey<T>): T = key.defaultValue
+    /**
+     * Returns each key's compiled-in default, EXCEPT [ConfigKey.Domain]: for a source whose baked-in
+     * domain is dead and has moved, [SourcePatches.DOMAIN_OVERRIDES] supplies the current live domain
+     * (keyed by the upstream MangaParserSource.name). This is what makes relocated sources work — the
+     * parser then requests, and absolutizes page URLs against, the live domain. Mirrors the Nyora Mihon
+     * extension's OverrideSourceConfig; previously getConfig always returned defaults, leaving
+     * DOMAIN_OVERRIDES inert.
+     */
+    private class OverrideSourceConfig(private val source: LibMangaSource) : MangaSourceConfig {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T> get(key: ConfigKey<T>): T = when (key) {
+            is ConfigKey.Domain -> (SourcePatches.DOMAIN_OVERRIDES[source.name] ?: key.defaultValue) as T
+            else -> key.defaultValue
+        }
     }
 }
