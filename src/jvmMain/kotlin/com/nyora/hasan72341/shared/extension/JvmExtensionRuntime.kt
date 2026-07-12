@@ -10,7 +10,17 @@ class JvmExtensionRuntime(
 ) : MangaExtensionRuntime {
 
     private val nativeFactory: (MangaSource) -> MangaExtensionService =
-        { source -> KotatsuParserExtensionService(source, networkConfig = networkConfig) }
+        { source ->
+            // MangaFire relaunched on a new JSON API (/api/titles); the bundled
+            // kotatsu-parsers-redo MangaFire (old /filter HTML + vrf + scrambling)
+            // now returns 0 results, so serve it from a native app-layer service.
+            // Every MANGAFIRE_* language source (parser:MANGAFIRE_EN/ES/…) routes here.
+            if (source.id.startsWith("parser:MANGAFIRE")) {
+                MangaFireExtensionService(source, networkConfig)
+            } else {
+                KotatsuParserExtensionService(source, networkConfig = networkConfig)
+            }
+        }
 
     private val delegate = CommonMangaExtensionRuntime(
         // Native kotatsu-parsers-redo engine. Both the canonical "Parser" engine and any
