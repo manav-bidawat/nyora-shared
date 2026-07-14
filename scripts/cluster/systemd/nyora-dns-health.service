@@ -1,0 +1,10 @@
+[Unit]
+Description=Nyora cluster self-healing DNS (add/remove this node from CF round-robin)
+After=network-online.target nyora-parser.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/default/nyora-cluster
+ExecStart=/usr/local/bin/nyora-dns-health.sh

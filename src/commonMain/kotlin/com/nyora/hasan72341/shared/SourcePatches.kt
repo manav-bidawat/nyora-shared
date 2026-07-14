@@ -42,6 +42,9 @@ object SourcePatches {
     )
 
     val DEAD_SOURCES: Set<String> = setOf(
+        // Old Asura Madara site (asurascans.us, wp-admin/admin-ajax → 502). The LIVE Asura is the
+        // separate ASURASCANS source ("AsuraComic", asurascans.com, new site structure), kept enabled.
+        "ASURASCANS_US",
         "ATEMPORAL",
         "AYATOON",
         "BANANA_MANGA",

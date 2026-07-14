@@ -1,0 +1,18 @@
+[Unit]
+Description=Nyora Parser Helper (native kotatsu-parsers) — cluster node
+After=network-online.target warp-svc.service
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/nyora-parser
+Environment=NYORA_HELPER_PORT=8788
+# 6 GB nodes have room — raise the heap well above the 1 GB-box tuning.
+Environment=JAVA_TOOL_OPTIONS=
+EnvironmentFile=-/etc/default/nyora-cluster
+ExecStart=/usr/bin/java -Xmx1g -Xss512k -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=96m -XX:+UseSerialGC -jar /home/ubuntu/nyora-parser/nyora-helper.jar
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
