@@ -21,13 +21,13 @@ import java.time.Instant
 import com.nyora.hasan72341.shared.model.MangaSource as NyoraMangaSource
 
 /**
- * Native ToonDex source (was Toonily.me → toondex.io). ToonDex rebuilt on the MangaBuddy
- * reader-network codebase, backed by a clean JSON API at api.toondex.io — the old kotatsu
+ * Native ToonDex source (was Toonily.me → toondex.io → toontop.io). ToonDex rebuilt on the MangaBuddy
+ * reader-network codebase, backed by a clean JSON API at api.toontop.io — the old kotatsu
  * Madtheme parser (scraping the WordPress site) no longer matches, so it returned nothing.
  * This ports the API directly (same approach as [MangaFireExtensionService]); it replaces
  * the kotatsu TOONILY_ME source.
  *
- * Endpoints (all on api.toondex.io, no rotating Next.js buildId needed):
+ * Endpoints (all on api.toontop.io, no rotating Next.js buildId needed):
  *   GET /titles/search?sort=popular|latest&page=N   and   ?q=<query>&page=N   → browse/search
  *   GET /titles/{id}                                                          → details
  *   GET /titles/{id}/chapters?page=N                                          → chapter list
@@ -38,8 +38,8 @@ class ToonDexExtensionService(
     networkConfig: HelperNetworkConfig,
 ) : MangaExtensionService {
 
-    private val apiUrl = "https://api.toondex.io"
-    private val siteUrl = "https://toondex.io"
+    private val apiUrl = "https://api.toontop.io"
+    private val siteUrl = "https://toontop.io"
     private val parserName = "TOONILY_ME"
 
     private val client: OkHttpClient = buildOkHttpClient(networkConfig.snapshot())
