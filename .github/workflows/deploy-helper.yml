@@ -1,0 +1,101 @@
+name: Deploy helper → cluster
+
+# Pushing to the `deploy` branch builds nyora-helper.jar from src/ and rolls it
+# out to all THREE nodes behind api.nyora.xyz (round-robin DNS): nyora, expo-vm,
+# claw. Each runs the `nyora-parser` systemd service; after swapping the jar we
+# run restart-helper.sh (restart → poll /health → regenerate the static catalog
+# snapshot → refresh the browse-cache sidecar).
+#
+# Repo secrets required:
+#   DEPLOY_SSH_KEY      — private key of the CI helper deploy key (in each node's
+#                         <user> authorized_keys; jar dir writable + passwordless sudo)
+#   DEPLOY_KNOWN_HOSTS  — ssh-keyscan lines for all three node IPs
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-nyora-helper
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build nyora-helper.jar
+        run: ./gradlew helperJar --no-daemon --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nyora-helper-jar
+          path: build/libs/nyora-helper.jar
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # roll one node at a time so the cluster never fully drops
+      matrix:
+        include:
+          - { name: nyora,   host: 80.225.255.105, user: ubuntu, dir: /home/ubuntu/nyora-parser }
+          - { name: expo-vm, host: 130.210.22.247, user: opc,    dir: /opt/nyora-parser }
+          - { name: claw,    host: 130.210.55.91,  user: ubuntu, dir: /home/ubuntu/nyora-parser }
+    steps:
+      - uses: actions/checkout@v4   # for scripts/restart-helper.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: nyora-helper-jar
+          path: artifact
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy jar + restart ${{ matrix.name }}
+        run: |
+          SSH="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+          SCP="scp -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+          T="${{ matrix.user }}@${{ matrix.host }}"
+          D="${{ matrix.dir }}"
+          $SCP artifact/nyora-helper.jar "$T:$D/nyora-helper.jar.new"
+          $SCP scripts/restart-helper.sh "$T:$D/restart-helper.sh"
+          $SSH "$T" "set -e
+            chmod +x '$D/restart-helper.sh'
+            mv -f '$D/nyora-helper.jar.new' '$D/nyora-helper.jar'
+            cd '$D' && bash ./restart-helper.sh"
+
+      - name: Health check ${{ matrix.name }}
+        run: |
+          for i in 1 2 3 4 5 6 7 8; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+              --resolve api.nyora.xyz:443:${{ matrix.host }} https://api.nyora.xyz/health || true)
+            echo "  ${{ matrix.name }} (${{ matrix.host }}) attempt $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 4
+          done
+          echo "::error::${{ matrix.name }} helper not healthy after deploy"
+          exit 1
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Public api.nyora.xyz healthy + serving sources
+        run: |
+          for ep in health sources/catalog; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://api.nyora.xyz/$ep" || true)
+            echo "  /$ep → HTTP $code"
+            [ "$code" = "200" ] || { echo "::error::api.nyora.xyz/$ep not 200"; exit 1; }
+          done
