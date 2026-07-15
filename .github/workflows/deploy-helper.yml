@@ -43,13 +43,20 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1   # roll one node at a time so the cluster never fully drops
-      # Node list (IPs / SSH users / jar dirs) lives in the DEPLOY_MATRIX repo
-      # variable, not in this public workflow. Format: [{ name, host, user, dir }, …].
+      # Matrix carries only harmless node NAMES (they become the public job name).
+      # Each node's IP/user/jar-dir is looked up from the DEPLOY_NODES secret at
+      # runtime and the IP is masked in logs — nothing sensitive in the workflow,
+      # the job name, or the run logs.
       matrix:
-        include: ${{ fromJson(vars.DEPLOY_MATRIX) }}
+        node: [nyora, expo-vm, claw]
     steps:
-      - name: Mask node host in logs
-        run: echo "::add-mask::${{ matrix.host }}"
+      - name: Resolve node from DEPLOY_NODES (mask IP in logs)
+        run: |
+          host=$(jq -r --arg n "${{ matrix.node }}" '.[$n].host' <<<'${{ secrets.DEPLOY_NODES }}')
+          user=$(jq -r --arg n "${{ matrix.node }}" '.[$n].user' <<<'${{ secrets.DEPLOY_NODES }}')
+          dir=$(jq -r --arg n "${{ matrix.node }}" '.[$n].dir'   <<<'${{ secrets.DEPLOY_NODES }}')
+          echo "::add-mask::$host"
+          { echo "HOST=$host"; echo "SSH_USER=$user"; echo "JAR_DIR=$dir"; } >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4   # for scripts/restart-helper.sh
       - uses: actions/download-artifact@v4
@@ -65,12 +72,12 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Deploy jar + restart ${{ matrix.name }}
+      - name: Deploy jar + restart ${{ matrix.node }}
         run: |
           SSH="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
           SCP="scp -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
-          T="${{ matrix.user }}@${{ matrix.host }}"
-          D="${{ matrix.dir }}"
+          T="$SSH_USER@$HOST"
+          D="$JAR_DIR"
           $SCP artifact/nyora-helper.jar "$T:$D/nyora-helper.jar.new"
           $SCP scripts/restart-helper.sh "$T:$D/restart-helper.sh"
           $SSH "$T" "set -e
@@ -78,16 +85,16 @@ jobs:
             mv -f '$D/nyora-helper.jar.new' '$D/nyora-helper.jar'
             cd '$D' && bash ./restart-helper.sh"
 
-      - name: Health check ${{ matrix.name }}
+      - name: Health check ${{ matrix.node }}
         run: |
           for i in 1 2 3 4 5 6 7 8; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-              --resolve api.nyora.xyz:443:${{ matrix.host }} https://api.nyora.xyz/health || true)
-            echo "  ${{ matrix.name }} (${{ matrix.host }}) attempt $i → HTTP $code"
+              --resolve api.nyora.xyz:443:"$HOST" https://api.nyora.xyz/health || true)
+            echo "  ${{ matrix.node }} attempt $i → HTTP $code"
             [ "$code" = "200" ] && exit 0
             sleep 4
           done
-          echo "::error::${{ matrix.name }} helper not healthy after deploy"
+          echo "::error::${{ matrix.node }} helper not healthy after deploy"
           exit 1
 
   verify:
