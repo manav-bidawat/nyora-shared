@@ -43,12 +43,14 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1   # roll one node at a time so the cluster never fully drops
+      # Node list (IPs / SSH users / jar dirs) lives in the DEPLOY_MATRIX repo
+      # variable, not in this public workflow. Format: [{ name, host, user, dir }, …].
       matrix:
-        include:
-          - { name: nyora,   host: 80.225.255.105, user: ubuntu, dir: /home/ubuntu/nyora-parser }
-          - { name: expo-vm, host: 130.210.22.247, user: opc,    dir: /opt/nyora-parser }
-          - { name: claw,    host: 130.210.55.91,  user: ubuntu, dir: /home/ubuntu/nyora-parser }
+        include: ${{ fromJson(vars.DEPLOY_MATRIX) }}
     steps:
+      - name: Mask node host in logs
+        run: echo "::add-mask::${{ matrix.host }}"
+
       - uses: actions/checkout@v4   # for scripts/restart-helper.sh
       - uses: actions/download-artifact@v4
         with:
