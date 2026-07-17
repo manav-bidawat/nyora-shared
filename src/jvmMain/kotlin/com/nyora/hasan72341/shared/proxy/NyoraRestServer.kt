@@ -673,7 +673,9 @@ class NyoraRestServer(
         // triggers a background refresh. Only a truly-never-seen key fetches inline.
         if (cacheKey != null) {
             ResponseCache.peek(cacheKey)?.let { hit ->
-                respondJsonRaw(exchange, 200, hit.value)
+                // Re-proxy covers to the CURRENT port: the cache is disk-persisted, so a
+                // body cached by a previous launch embeds that launch's dead loopback port.
+                respondJsonRaw(exchange, 200, reproxyBrowseBody(hit.value))
                 if (hit.stale) revalidateBrowse(cacheKey, id, mode, page, params["f"])
                 return
             }
@@ -729,18 +731,40 @@ class NyoraRestServer(
         } finally {
             if (isSearch) com.nyora.hasan72341.shared.net.CloudflareInterceptor.searchFanoutActive.decrementAndGet()
         }
-        val body = json.encodeToString(
+        // Cache the RAW cover URLs (never a proxy URL) — the proxy port changes per launch
+        // and the cache is disk-persisted, so caching a proxied body would embed a dead
+        // port. Covers are proxied to the current port at serve time via reproxyBrowseBody.
+        val rawBody = json.encodeToString(
             BrowseResponse.serializer(),
-            BrowseResponse(
-                entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
-                hasNextPage = result.hasNextPage,
-            ),
+            BrowseResponse(entries = result.entries, hasNextPage = result.hasNextPage),
         )
         if (cacheKey != null && result.entries.isNotEmpty()) {
-            ResponseCache.put(cacheKey, body, 600_000) // 10 min fresh window
+            ResponseCache.put(cacheKey, rawBody, 600_000) // 10 min fresh window
         }
-        return body
+        return reproxyBrowseBody(rawBody)
     }
+
+    /** Un-proxy a cover URL: if it is one of our own `…/image?u=<enc>` proxy URLs (possibly
+     *  carrying a stale port from a previous launch's disk-snapshot cache), decode it back
+     *  to the raw CDN url. Already-raw urls pass through untouched. */
+    private fun unproxyCover(url: String): String {
+        val marker = "/image?u="
+        val idx = url.indexOf(marker)
+        if (idx < 0) return url
+        val enc = url.substring(idx + marker.length).substringBefore('&')
+        return runCatching { URLDecoder.decode(enc, StandardCharsets.UTF_8) }.getOrDefault(url)
+    }
+
+    /** Rewrite a browse body's cover URLs to the CURRENT helper port. Handles both freshly
+     *  cached raw bodies and stale proxied bodies restored from the disk snapshot. Referer
+     *  is derived from the image origin in handleImage, so no source baseUrl is needed. */
+    private fun reproxyBrowseBody(body: String): String = runCatching {
+        val parsed = json.decodeFromString(BrowseResponse.serializer(), body)
+        json.encodeToString(
+            BrowseResponse.serializer(),
+            parsed.copy(entries = parsed.entries.map { it.copy(coverUrl = proxyCoverUrl(unproxyCover(it.coverUrl), "")) }),
+        )
+    }.getOrDefault(body)
 
     /** Refresh a stale browse entry in the background so the NEXT request is fresh
      *  — the current request already got an instant (stale) response. */
@@ -1502,7 +1526,21 @@ class NyoraRestServer(
             ?: return respondError(exchange, 400, "Missing 'u'")
         val headers = pairs.filter { it.first == "h" }.mapNotNull { (_, v) ->
             val colon = v.indexOf(':'); if (colon <= 0) null else v.substring(0, colon) to v.substring(colon + 1)
-        }.toMap()
+        }.toMap().toMutableMap()
+        // Hotlink/Cloudflare-protected cover CDNs (e.g. AnisaScans) 403 a refererless
+        // fetch, which turns into a 502 blank cover. proxyCoverUrl can only add a Referer
+        // when it knows the source baseUrl — and parser sources carry an empty baseUrl, so
+        // it never does. Mirror nyora-web's refererFromProxied: when no Referer was
+        // supplied, derive one from the image's OWN origin. Fixes covers + page images for
+        // every parser source in a single place.
+        if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+            runCatching {
+                val u = java.net.URI(url)
+                if (!u.scheme.isNullOrBlank() && !u.host.isNullOrBlank()) {
+                    headers["Referer"] = "${u.scheme}://${u.host}/"
+                }
+            }
+        }
         try {
             val bytes = pageLoader.loadBytes(url, headers)
             val contentType = guessContentType(url, bytes)
