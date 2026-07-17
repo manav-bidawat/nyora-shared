@@ -17,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -99,6 +100,17 @@ internal object FlareSolverr {
 object CloudflareInterceptor : Interceptor {
     private val solvedUserAgent = ConcurrentHashMap<String, String>()
 
+    // When the host app can solve challenges itself, signal the challenge to it rather
+    // than spawning a headless Chrome. The macOS app sets this: it owns a WKWebView,
+    // which is already part of the OS, runs on the user's own residential IP, and can
+    // beat Turnstile because a human can click it — none of which FlareSolverr can do.
+    // The app catches "Cloudflare challenge: <host>", solves, POSTs the cf_clearance to
+    // /cloudflare/clearance, and retries.
+    //
+    // Off by default, so the headless cluster (which has no WebView and a real
+    // FlareSolverr on 127.0.0.1:8191) keeps its existing behaviour untouched.
+    private val nativeSolver: Boolean = !System.getenv("NYORA_NATIVE_CF_SOLVER").isNullOrBlank()
+
     // While a broad global search is fanning out, skip ALL Cloudflare escalation
     // (FlareSolverr/proxy/device) and fail fast on blocked sources — solving CF for
     // hundreds of sources at once would pin the VM. Blocked sources simply don't
@@ -144,7 +156,19 @@ object CloudflareInterceptor : Interceptor {
         if (hostBlocked(host)) return response
         val challenge = isChallenge(response)
 
-        // 1) Server-side solve: classic "Just a moment" JS challenges (cheap, fast).
+        // 1) Native solve: hand the challenge to the host app's own WebView (macOS
+        //    WKWebView). It solves on the user's real IP — passively first, and
+        //    interactively if Turnstile wants a click — then POSTs the cf_clearance to
+        //    /cloudflare/clearance and retries. The app's WebView UA is byte-identical to
+        //    NYORA_BROWSER_UA (see HelperNetworkSettings), so the clearance it returns is
+        //    valid for our own requests without any UA juggling.
+        if (challenge && nativeSolver) {
+            response.close()
+            throw IOException("Cloudflare challenge: $host")
+        }
+
+        // 1b) Server-side solve: classic "Just a moment" JS challenges (cheap, fast).
+        //     Headless-Chrome path, for hosts with no native WebView (the cluster).
         if (challenge) {
             val solution = FlareSolverr.solve(request.url.toString())
             if (solution != null) {
