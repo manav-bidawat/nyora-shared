@@ -154,14 +154,19 @@ object CloudflareInterceptor : Interceptor {
         if (searchFanoutActive.get() > 0) return response
         // Fail fast for hosts we already know we can't get through — no re-solve churn.
         if (hostBlocked(host)) return response
-        val challenge = isChallenge(response)
+        // Classify like nyora-android's CloudFlareHelper: a solvable interactive/JS
+        // challenge is distinct from a hard "you have been blocked" page. A WebView can
+        // beat the former but never the latter, so only the former should pop the browser.
+        val protection = cfProtection(response)
+        val challenge = protection == CfProtection.CHALLENGE
 
-        // 1) Native solve: hand the challenge to the host app's own WebView (macOS
+        // 1) Native solve: hand a SOLVABLE challenge to the host app's own WebView (macOS
         //    WKWebView). It solves on the user's real IP — passively first, and
         //    interactively if Turnstile wants a click — then POSTs the cf_clearance to
         //    /cloudflare/clearance and retries. The app's WebView UA is byte-identical to
         //    NYORA_BROWSER_UA (see HelperNetworkSettings), so the clearance it returns is
-        //    valid for our own requests without any UA juggling.
+        //    valid for our own requests without any UA juggling. A hard block skips this and
+        //    falls through to a different egress (residential/device) below.
         if (challenge && nativeSolver) {
             response.close()
             throw IOException("Cloudflare challenge: $host")
@@ -249,17 +254,44 @@ object CloudflareInterceptor : Interceptor {
             .build()
     }
 
-    private fun isChallenge(response: Response): Boolean {
-        if (response.code != 403 && response.code != 503) return false
-        if (response.header("cf-mitigated") == "challenge") return true
-        val peek = try {
-            response.peekBody(16 * 1024).string().lowercase()
+    private enum class CfProtection { NONE, CHALLENGE, BLOCKED }
+
+    /**
+     * Classify a response's Cloudflare protection, ported from nyora-android's
+     * CloudFlareHelper.checkResponseForProtection so desktop and Android agree on what is
+     * solvable. Only 403/503 from a Cloudflare edge is considered; `cf-mitigated: challenge`
+     * is the definitive modern signal; a "you have been blocked" page is a hard BLOCK that a
+     * WebView cannot beat (only a different egress can), so it is kept distinct from the
+     * interactive/JS CHALLENGE that the WebView solves.
+     */
+    private fun cfProtection(response: Response): CfProtection {
+        if (response.code != 403 && response.code != 503) return CfProtection.NONE
+        val cfRay = response.header("cf-ray")
+        val server = response.header("server")
+        val cfMitigated = response.header("cf-mitigated")
+        val isCloudflare = cfRay != null ||
+            server?.contains("cloudflare", ignoreCase = true) == true ||
+            cfMitigated != null
+        if (!isCloudflare) return CfProtection.NONE
+        if (cfMitigated?.contains("challenge", ignoreCase = true) == true) return CfProtection.CHALLENGE
+        val body = try {
+            response.peekBody(64 * 1024).string()
         } catch (_: Throwable) {
-            return false
+            return CfProtection.NONE
         }
-        return "just a moment" in peek ||
-            "cf-chl" in peek ||
-            "challenge-platform" in peek ||
-            "enable javascript and cookies" in peek
+        val lower = body.lowercase()
+        return when {
+            // Hard block ("Sorry, you have been blocked …") — unsolvable by a browser.
+            "blocked_why_headline" in body || "cf-error-details" in lower -> CfProtection.BLOCKED
+            // Solvable interactive / managed / legacy-JS challenge.
+            "just a moment" in lower ||
+                "__cf_chl_opt" in lower ||
+                "cf-browser-verification" in lower ||
+                "challenge-error-title" in lower ||
+                "challenge-platform" in lower ||
+                "cf-chl" in lower ||
+                "enable javascript and cookies" in lower -> CfProtection.CHALLENGE
+            else -> CfProtection.NONE
+        }
     }
 }
