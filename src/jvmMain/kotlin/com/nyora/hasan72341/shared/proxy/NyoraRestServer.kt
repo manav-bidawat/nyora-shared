@@ -250,7 +250,8 @@ class NyoraRestServer(
         }
         respondJson(exchange, 200, buildJsonObject {
             put("name", "Nyora helper")
-            put("baseUrl", baseUrl)
+            // baseUrl (the internal 127.0.0.1 bind) intentionally omitted — the hosted
+            // banner shouldn't advertise the origin's internal address.
         })
     }
 
