@@ -7,6 +7,7 @@ import com.nyora.hasan72341.shared.download.DownloadFormat
 import com.nyora.hasan72341.shared.download.DownloadSettings
 import com.nyora.hasan72341.shared.net.HelperNetworkConfig
 import com.nyora.hasan72341.shared.net.HelperNetworkSettings
+import com.nyora.hasan72341.shared.net.SsrfGuard
 import com.nyora.hasan72341.shared.model.Library
 import com.nyora.hasan72341.shared.model.Manga
 import com.nyora.hasan72341.shared.model.MangaChapter
@@ -1503,8 +1504,15 @@ class NyoraRestServer(
         val headers = pairs.filter { it.first == "h" }.mapNotNull { (_, v) ->
             val colon = v.indexOf(':'); if (colon <= 0) null else v.substring(0, colon) to v.substring(colon + 1)
         }.toMap()
+        // This proxy is publicly reachable (Caddy → loopback), so the target is untrusted:
+        // reject non-http URLs (no local-file reads) and private/internal hosts (no SSRF).
         try {
-            val bytes = pageLoader.loadBytes(url, headers)
+            SsrfGuard.assertPublicHttpUrl(url)
+        } catch (_: SecurityException) {
+            return respondError(exchange, 400, "Invalid image URL")
+        }
+        try {
+            val bytes = pageLoader.loadBytes(url, headers, allowLocalFiles = false, blockPrivateHosts = true)
             val contentType = guessContentType(url, bytes)
             applyCors(exchange)
             exchange.responseHeaders.add("Content-Type", contentType)

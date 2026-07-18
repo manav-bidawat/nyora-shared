@@ -98,9 +98,16 @@ private val unlimitedDispatcher: Dispatcher
         maxRequestsPerHost = System.getenv("NYORA_MAX_PER_HOST")?.toIntOrNull() ?: 256
     }
 
-fun buildOkHttpClient(settings: HelperNetworkSettings): OkHttpClient =
+fun buildOkHttpClient(
+    settings: HelperNetworkSettings,
+    // When true, refuse connections to private/reserved/loopback addresses — for the public
+    // image proxy, where the target URL is attacker-controlled (SSRF protection). Applied at the
+    // DNS layer so it also covers redirect hops and DNS-rebinding.
+    blockPrivateHosts: Boolean = false,
+): OkHttpClient =
     OkHttpClient.Builder()
         .dispatcher(unlimitedDispatcher)
+        .apply { if (blockPrivateHosts) dns(SsrfGuard.safeDns) }
         .followRedirects(true)
         .followSslRedirects(true)
         .cookieJar(sharedCookieJar)
@@ -146,6 +153,7 @@ fun fetchBytes(
     url: String,
     settings: HelperNetworkSettings,
     headers: Map<String, String> = emptyMap(),
+    blockPrivateHosts: Boolean = false,
 ): ByteArray {
     val request = Request.Builder()
         .url(url)
@@ -153,7 +161,7 @@ fun fetchBytes(
         .apply { headers.forEach { (key, value) -> header(key, value) } }
         .get()
         .build()
-    buildOkHttpClient(settings).newCall(request).execute().use { response ->
+    buildOkHttpClient(settings, blockPrivateHosts).newCall(request).execute().use { response ->
         if (!response.isSuccessful) {
             error("Request failed with HTTP ${response.code}")
         }
