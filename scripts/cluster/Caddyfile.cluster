@@ -24,7 +24,7 @@
 (helper_ha) {
 	reverse_proxy 127.0.0.1:8788 {
 		header_up Host {host}
-		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Real-IP {http.request.remote_host}
 		transport http {
 			keepalive 90s
 			keepalive_idle_conns 1024
@@ -106,7 +106,7 @@ sync.nyora.xyz {
 	encode gzip
 	reverse_proxy {$NYORA_SYNC_HOST}:8787 {
 		header_up Host {host}
-		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Real-IP {http.request.remote_host}
 		flush_interval -1
 		transport http { keepalive 30s }
 	}
@@ -115,6 +115,14 @@ sync.nyora.xyz {
 
 # ============================ Static app + marketing =========================
 web.nyora.xyz {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
 	encode gzip zstd
 	root * /srv/web
 	@immutable path /chunk-*.js
@@ -133,6 +141,14 @@ web.nyora.xyz {
 }
 
 nyora.xyz {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
 	encode gzip zstd
 	root * /srv/site
 	try_files {path} /index.html
