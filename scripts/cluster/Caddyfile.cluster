@@ -50,12 +50,16 @@
 
 # ============================ Helper API =====================================
 api.nyora.xyz {
-	header {
-		Access-Control-Allow-Origin "*"
-		Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS"
-		Access-Control-Allow-Headers "Content-Type"
-		defer
-	}
+    # CORS: reflect the Origin only for nyora.xyz + its subdomains (and localhost dev);
+    # every other browser origin gets no ACAO and is blocked from reading the API.
+    @allowed_origin header_regexp Origin ^https?://(([a-z0-9.-]+\.)?nyora\.xyz|localhost|127\.0\.0\.1)(:[0-9]+)?$
+    header @allowed_origin {
+        Access-Control-Allow-Origin "{http.request.header.Origin}"
+        Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type"
+        Vary Origin
+        defer
+    }
 	@cors_preflight method OPTIONS
 	handle @cors_preflight { respond 204 }
 	encode gzip

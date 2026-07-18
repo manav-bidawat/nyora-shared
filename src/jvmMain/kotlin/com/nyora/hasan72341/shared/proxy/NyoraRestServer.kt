@@ -364,7 +364,10 @@ class NyoraRestServer(
         if (!corsEnabled) return
         val headers = exchange.responseHeaders
         if (headers.containsKey("Access-Control-Allow-Origin")) return
-        headers.add("Access-Control-Allow-Origin", "*")
+        // Response depends on the request Origin, so it must not be cached across origins.
+        headers.add("Vary", "Origin")
+        val origin = allowedCorsOrigin(exchange) ?: return
+        headers.add("Access-Control-Allow-Origin", origin)
         headers.add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         headers.add("Access-Control-Allow-Headers", "Content-Type")
     }
@@ -2599,6 +2602,24 @@ private val SWAGGER_UI_HTML: String = """
  *  - Per-client-IP token bucket → one abuser can't monopolize the box (429).
  * Loopback + long-poll (device relay) bypass the caps. Tunable via env.
  */
+// Browser origins allowed to read the API cross-origin: nyora.xyz + any subdomain (and localhost
+// for local dev). Overridable via NYORA_ALLOWED_ORIGINS (comma-separated host suffixes). Other
+// origins get no ACAO header, so their browser blocks the response; native clients (iOS/desktop)
+// send no Origin and are unaffected.
+private val ALLOWED_ORIGIN_SUFFIXES: List<String> =
+    System.getenv("NYORA_ALLOWED_ORIGINS")
+        ?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }
+        ?: listOf("nyora.xyz")
+
+/** Returns the request Origin to echo in Access-Control-Allow-Origin, or null if it isn't allowed. */
+private fun allowedCorsOrigin(exchange: HttpExchange): String? {
+    val origin = exchange.requestHeaders.getFirst("Origin") ?: return null
+    val host = runCatching { java.net.URI(origin).host }.getOrNull()?.lowercase() ?: return null
+    val allowed = host == "localhost" || host == "127.0.0.1" ||
+        ALLOWED_ORIGIN_SUFFIXES.any { host == it || host.endsWith(".$it") }
+    return if (allowed) origin else null
+}
+
 private object GuardFilter : Filter() {
     private val maxInFlight = System.getenv("NYORA_MAX_INFLIGHT")?.toIntOrNull() ?: 150
     private val perIpRate = System.getenv("NYORA_PER_IP_RATE")?.toDoubleOrNull() ?: 25.0   // tokens/sec
@@ -2633,7 +2654,7 @@ private object GuardFilter : Filter() {
     private fun reject(exchange: HttpExchange, code: Int, msg: String) {
         try {
             val bytes = msg.toByteArray()
-            exchange.responseHeaders.add("Access-Control-Allow-Origin", "*")
+            allowedCorsOrigin(exchange)?.let { exchange.responseHeaders.add("Access-Control-Allow-Origin", it) }
             exchange.responseHeaders.add("Retry-After", "2")
             exchange.sendResponseHeaders(code, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
