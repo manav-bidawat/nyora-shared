@@ -1,0 +1,185 @@
+stream.hasanraza.tech, sync.nyora.xyz {
+    encode gzip
+
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {host}
+        header_up X-Real-IP {http.request.remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        transport http {
+            keepalive 30s
+            keepalive_idle_conns 100
+        }
+
+        flush_interval -1
+    }
+
+    request_body {
+        max_size 0
+    }
+}
+
+
+(nyora_api_handlers) {
+
+    # CORS for the web app (all sub-handlers: static catalog, cache sidecar, helper) + preflight
+    # CORS: reflect the Origin only for nyora.xyz + its subdomains (and localhost dev);
+    # every other browser origin gets no ACAO and is blocked from reading the API.
+    @allowed_origin header_regexp Origin ^https?://(([a-z0-9.-]+\.)?nyora\.xyz|localhost|127\.0\.0\.1)(:[0-9]+)?$
+    header @allowed_origin {
+        Access-Control-Allow-Origin "{http.request.header.Origin}"
+        Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type"
+        Vary Origin
+        defer
+    }
+    @cors_preflight method OPTIONS
+    handle @cors_preflight {
+        respond 204
+    }
+    encode gzip
+
+    # Mihon/Tachiyomi extension repo (static files: index.min.json, repo.json, apk/, icon/).
+    handle_path /mihon/* {
+        root * /var/www/nyora-mihon
+        file_server
+    }
+
+    # Source catalog: served straight from the disk snapshot (fast, always up).
+    @catalog path /sources/catalog
+    handle @catalog {
+        root * /var/www/nyora
+        rewrite * /catalog.json
+        header Content-Type application/json
+        header Cache-Control "public, max-age=300, s-maxage=600, stale-while-revalidate=86400"
+        file_server {
+            precompressed gzip
+        }
+    }
+
+    # Browse endpoints: direct to the parser helper (in-memory cache) — the disk
+    # cache sidecar was reverted (it was slow/unreliable under load).
+    @browse path /sources/popular /sources/latest /sources/search /manga/details /manga/pages
+    handle @browse {
+        header Cache-Control "public, max-age=30, s-maxage=60, stale-while-revalidate=300"
+        reverse_proxy 127.0.0.1:8788 {
+            header_up Host {host}
+            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 1024
+                keepalive_idle_conns_per_host 1024
+            }
+        }
+    }
+
+
+    # Page/cover images: proxied through the helper, but they are IMMUTABLE
+    # content-addressed CDN blobs (the u= URL contains a content hash). Force
+    # public+immutable so Cloudflare's edge caches them — at scale the origin +
+    # WARP then serve only cold misses instead of every image for every user.
+    @image path /image
+    handle @image {
+        header Cache-Control "public, max-age=31536000, immutable"
+        reverse_proxy 127.0.0.1:8788 {
+            header_up Host {host}
+            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_down -Cache-Control
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 1024
+                keepalive_idle_conns_per_host 1024
+            }
+        }
+    }
+
+    # Everything else proxies to the parser helper as before.
+    handle {
+        reverse_proxy 127.0.0.1:8788 {
+            header_up Host {host}
+            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 1024
+                keepalive_idle_conns_per_host 1024
+            }
+        }
+    }
+}
+
+api.hasanraza.tech {
+	import nyora_api_handlers
+}
+
+api.nyora.xyz {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	import nyora_api_handlers
+}
+
+# Portfolio (static site) — Md Hasan Raza
+www.hasanraza.tech {
+    redir https://hasanraza.tech{uri} permanent
+}
+
+hasanraza.tech {
+    encode gzip
+    root * /var/www/portfolio
+    @assets path /assets/* /fonts/*
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+    try_files {path} /index.html
+    file_server
+}
+
+# Nyora marketing site (Astro static) — served from VM
+nyora.xyz {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
+    encode gzip
+    root * /var/www/nyora-marketing
+    try_files {path} {path}/ {path}.html /index.html
+    file_server
+}
+
+# Nyora web app (SPA) — served from VM
+web.nyora.xyz {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
+    encode gzip
+    root * /var/www/nyora-web
+    try_files {path} /index.html
+    file_server
+}
+
+# Legacy host — serves the app so its index.html migration script carries
+# the visitors library to web.nyora.xyz (moved off Cloudflare Pages).
+nyoramanga.hasanraza.tech {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
+    encode gzip
+    root * /var/www/nyora-web
+    try_files {path} /index.html
+    file_server
+}

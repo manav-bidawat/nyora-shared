@@ -1,0 +1,78 @@
+name: Deploy Caddy config → cluster
+
+# Rolls the per-node Caddyfiles in scripts/cluster/nodes/ out to the three nodes
+# (nyora, expo-vm, claw). Each node keeps its own file because the configs differ
+# (only nyora runs the sync vhost, etc.). The Cloudflare DNS token is NOT in these
+# files — it is {env.CF_API_TOKEN}, supplied on each node by /etc/caddy/caddy.env
+# (systemd EnvironmentFile), so nothing secret lives in the repo.
+#
+# Safety: per node we back up the live file, install the new one, `caddy validate`
+# with the env sourced, reload, and roll back to the backup on any failure. One
+# node at a time so the cluster never fully drops.
+#
+# Secrets: DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS, DEPLOY_NODES (same as deploy-helper).
+on:
+  push:
+    branches: [deploy]
+    paths: ['scripts/cluster/nodes/**']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-nyora-caddy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        node: [nyora, expo-vm, claw]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve node from DEPLOY_NODES (mask IP)
+        run: |
+          host=$(jq -r --arg n "${{ matrix.node }}" '.[$n].host' <<<'${{ secrets.DEPLOY_NODES }}')
+          user=$(jq -r --arg n "${{ matrix.node }}" '.[$n].user' <<<'${{ secrets.DEPLOY_NODES }}')
+          echo "::add-mask::$host"
+          { echo "HOST=$host"; echo "SSH_USER=$user"; } >> "$GITHUB_ENV"
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy Caddyfile → ${{ matrix.node }} (validate + rollback)
+        run: |
+          FILE="scripts/cluster/nodes/Caddyfile.${{ matrix.node }}"
+          [ -f "$FILE" ] || { echo "::error::$FILE missing"; exit 1; }
+          SSH="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+          SCP="scp -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+          T="$SSH_USER@$HOST"
+          $SCP "$FILE" "$T:/tmp/Caddyfile.new"
+          $SSH "$T" "set -e
+            ts=\$(date +%s); BK=/etc/caddy/Caddyfile.bak-cd-\$ts
+            sudo cp /etc/caddy/Caddyfile \$BK
+            sudo install -m644 /tmp/Caddyfile.new /etc/caddy/Caddyfile; rm -f /tmp/Caddyfile.new
+            if sudo bash -c 'set -a; . /etc/caddy/caddy.env 2>/dev/null; caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile' >/dev/null 2>&1; then
+              sudo systemctl reload caddy && echo 'reloaded'
+            else
+              echo 'validate failed — restoring'; sudo cp \$BK /etc/caddy/Caddyfile; sudo systemctl reload caddy || true; exit 1
+            fi"
+
+      - name: Health check ${{ matrix.node }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+              --resolve api.nyora.xyz:443:"$HOST" https://api.nyora.xyz/health || true)
+            echo "  ${{ matrix.node }} attempt $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 4
+          done
+          echo "::error::${{ matrix.node }} not healthy after Caddy reload"
+          exit 1
