@@ -241,6 +241,13 @@ class NyoraRestServer(
             serveStatic(exchange)
             return
         }
+        // Only the exact root returns the banner; any other unmatched path is a genuine
+        // 404 (previously every unknown path answered 200 with the banner, so clients
+        // couldn't tell a typo'd route from a real hit).
+        if (exchange.requestURI.path.orEmpty().trim('/').isNotEmpty()) {
+            respondError(exchange, 404, "Not found")
+            return
+        }
         respondJson(exchange, 200, buildJsonObject {
             put("name", "Nyora helper")
             put("baseUrl", baseUrl)
