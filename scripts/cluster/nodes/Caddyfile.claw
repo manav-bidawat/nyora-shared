@@ -49,9 +49,14 @@ api.nyora.xyz {
 		respond 204
 	}
 	encode gzip
-	reverse_proxy 127.0.0.1:8788 {
-		header_up Host {host}
-		header_up X-Real-IP {http.request.remote_host}
+	route {
+		# Local-device-only surface — not valid on the public host.
+		@local path /library /library/* /downloads /downloads/* /supabase /supabase/* /ota /ota/* /local /local/*
+		respond @local 404
+		reverse_proxy 127.0.0.1:8788 {
+			header_up Host {host}
+			header_up X-Real-IP {http.request.remote_host}
+		}
 	}
 }
 

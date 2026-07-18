@@ -95,6 +95,13 @@ stream.hasanraza.tech, sync.nyora.xyz {
         }
     }
 
+    # Local-device-only surface (library/downloads/supabase/ota/local) — these act on
+    # on-device state and must not be reachable on the public host. 404 before the catch-all.
+    @local path /library /library/* /downloads /downloads/* /supabase /supabase/* /ota /ota/* /local /local/*
+    handle @local {
+        respond 404
+    }
+
     # Everything else proxies to the parser helper as before.
     handle {
         reverse_proxy 127.0.0.1:8788 {
