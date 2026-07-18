@@ -1,0 +1,38 @@
+# Nyora parser node — Caddy on :7860 (HF's app_port). HF's edge terminates TLS,
+# so we serve plain HTTP here. Same CORS + local-route hardening as the VM nodes.
+{
+	admin off
+	auto_https off
+	storage file_system {
+		root /config
+	}
+}
+
+:7860 {
+	encode gzip
+
+	# CORS: reflect the Origin only for nyora.xyz + its subdomains (and localhost dev).
+	@allowed_origin header_regexp Origin ^https?://(([a-z0-9.-]+\.)?nyora\.xyz|localhost|127\.0\.0\.1)(:[0-9]+)?$
+	header @allowed_origin {
+		Access-Control-Allow-Origin "{http.request.header.Origin}"
+		Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+		Vary Origin
+		defer
+	}
+	@cors_preflight method OPTIONS
+	handle @cors_preflight {
+		respond 204
+	}
+
+	# The helper reads the client IP from X-Forwarded-For (HF's edge sets it) for
+	# per-IP rate limiting; Caddy passes it through, so no X-Real-IP override needed.
+	route {
+		# Local-device-only surface — not valid on a public node.
+		@local path /library /library/* /downloads /downloads/* /supabase /supabase/* /ota /ota/* /local /local/*
+		respond @local 404
+		reverse_proxy 127.0.0.1:8788 {
+			header_up Host {host}
+		}
+	}
+}
