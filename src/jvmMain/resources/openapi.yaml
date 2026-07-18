@@ -13,10 +13,9 @@ info:
     Accounts and cross-device library sync are a **separate service**
     (the Sync API), documented at the host's `/docs` for `stream.hasanraza.tech`.
 
-    > This same server also exposes a broader **local-only** management surface
-    > (`/library/*`, `/downloads/*`, `/library/categories/*`, `/supabase/*`,
-    > `/ota/*`) used by the desktop app's in-process helper. Those act on local
-    > device state and are intentionally **omitted** here.
+    > This is the content-only surface. Account and library-management endpoints
+    > exist only inside the desktop app's in-process helper — they act on local
+    > device state and are **not served on this public host**.
 
     ---
 
@@ -33,11 +32,21 @@ info:
       `/manga/details` wants; a `chapter.url` is what `/manga/pages` wants. Don't parse or rewrite them.
     - **Images go through `/image`** — source CDNs require a matching Referer/User-Agent
       the proxy supplies; `coverUrl`/page URLs are already rewritten to point here.
-    - **Errors** are JSON: `{"error":"<message>"}`.
+    - **Errors** are JSON: `{"error":"<message>"}`. Unknown paths return the service
+      banner with `200`, so check the response body, not just the status.
+
+    ## Rate limits & CORS
+    - **Rate limited per client IP** (token bucket, ~300 req/s, burst ~800). Exceeding
+      it returns `429` with a `Retry-After` header. All-source search fans a single
+      request out to every installed source, so it is proportionally heavier — prefer a
+      specific `id` where possible.
+    - **CORS** is restricted to `nyora.xyz` and its subdomains: matching browser origins
+      get them reflected in `Access-Control-Allow-Origin`, others get no CORS header.
+      Non-browser clients (native apps) send no `Origin` and are unaffected.
 
   contact:
     name: Nyora
-    url: https://nyora.pages.dev
+    url: https://web.nyora.xyz
   license:
     name: Proprietary
 
@@ -233,7 +242,11 @@ paths:
       summary: Proxy a cover or page image
       description: |
         Fetches an upstream image with the correct Referer/User-Agent and streams
-        the bytes back with permissive CORS and a 1-day private cache.
+        the bytes back. Only public `http(s)` targets are allowed — private,
+        loopback and link-local hosts are rejected with `400 Invalid image URL`.
+        Successful responses are cached long-lived and immutable (the `u` URL is
+        content-addressed); error responses are not cached. CORS follows the same
+        `nyora.xyz` allowlist as the rest of the API.
       parameters:
         - name: u
           in: query
@@ -358,7 +371,7 @@ components:
       properties:
         type: { type: string }
         name: { type: string, example: "MANGADEX" }
-      required: [name]
+      required: [type, name]
 
     MangaTag:
       type: object
