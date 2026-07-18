@@ -39,11 +39,18 @@ web.nyora.xyz {
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
+        X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()"
+        Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' blob: data: https://api.nyora.xyz https://sync.nyora.xyz https://huggingface.co https://*.huggingface.co https://*.hf.co https://raw.githubusercontent.com https://translate.googleapis.com https://graphql.anilist.co https://api.mangabaka.dev https://*.fandom.com https://api.openai.com https://api.anthropic.com"
         -Server
     }
+    # Ported from the web app _headers (Caddy ignores that file): content-hashed bundles
+    # cache forever; the service worker + discover feed must always revalidate.
+    @immutable path /chunk-*.js /api-*.js /zip-*.js
+    header @immutable Cache-Control "public, max-age=31536000, immutable"
+    @nocache path /sw.js /discover-feed.json
+    header @nocache Cache-Control "no-cache, no-store, must-revalidate"
 	tls {
 		dns cloudflare {env.CF_API_TOKEN}
 	}
