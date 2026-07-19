@@ -13,6 +13,15 @@ name: Deploy helper → cluster
 on:
   push:
     branches: [deploy]
+    # Only rebuild+roll the jar when the helper actually changes — not on caddy-,
+    # HF-, or script-only deploy pushes.
+    paths:
+      - 'src/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle/**'
+      - 'scripts/restart-helper.sh'
+      - '.github/workflows/deploy-helper.yml'
   workflow_dispatch:
 
 concurrency:
