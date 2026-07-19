@@ -34,6 +34,11 @@ api.nyora.xyz {
 	tls {
 		dns cloudflare {env.CF_API_TOKEN}
 	}
+    # Enforce HTTPS + hide any upstream server banner across the whole API vhost.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
     # CORS: reflect the Origin only for nyora.xyz + its subdomains (and localhost dev);
     # every other browser origin gets no ACAO and is blocked from reading the API.
     @allowed_origin header_regexp Origin ^https?://(([a-z0-9.-]+\.)?nyora\.xyz|localhost|127\.0\.0\.1)(:[0-9]+)?$
@@ -68,7 +73,7 @@ web.nyora.xyz {
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
         Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()"
-        Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' blob: data: https://*.hf.space https://api.nyora.xyz https://sync.nyora.xyz https://huggingface.co https://*.huggingface.co https://*.hf.co https://raw.githubusercontent.com https://translate.googleapis.com https://graphql.anilist.co https://api.mangabaka.dev https://*.fandom.com https://api.openai.com https://api.anthropic.com"
+        Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-L4viBrNiTcxYikBJf/zaHJ/03INVcJZX4lR1aKyDVkY=' 'sha256-vzvGIqtRN7kq7AkDUKB3Zm7V5mrc2GRwhoisCD3y4tA='; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' blob: data: https://*.hf.space https://api.nyora.xyz https://sync.nyora.xyz https://huggingface.co https://*.huggingface.co https://*.hf.co https://raw.githubusercontent.com https://translate.googleapis.com https://graphql.anilist.co https://api.mangabaka.dev https://*.fandom.com https://api.openai.com https://api.anthropic.com"
         -Server
     }
     # Ported from the web app _headers (Caddy ignores that file): content-hashed bundles
