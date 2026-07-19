@@ -110,3 +110,11 @@ nyora.xyz {
 	try_files {path} {path}/ {path}.html /index.html
 	file_server
 }
+
+# www → apex marketing redirect (DNS-01 cert so it works proxied behind CF)
+www.nyora.xyz {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	redir https://nyora.xyz{uri} permanent
+}
