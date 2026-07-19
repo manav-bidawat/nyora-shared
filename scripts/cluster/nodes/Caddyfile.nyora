@@ -10,7 +10,8 @@ stream.hasanraza.tech, sync.nyora.xyz {
 
     reverse_proxy 127.0.0.1:8787 {
         header_up Host {host}
-        header_up X-Real-IP {http.request.remote_host}
+        header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+        header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
         header_up X-Forwarded-Proto {scheme}
 
         transport http {
@@ -77,7 +78,8 @@ stream.hasanraza.tech, sync.nyora.xyz {
         header Cache-Control "public, max-age=30, s-maxage=60, stale-while-revalidate=300"
         reverse_proxy 127.0.0.1:8788 {
             header_up Host {host}
-            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+            header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
             header_up X-Forwarded-Proto {scheme}
             transport http {
                 keepalive 90s
@@ -97,7 +99,8 @@ stream.hasanraza.tech, sync.nyora.xyz {
         header Cache-Control "public, max-age=31536000, immutable"
         reverse_proxy 127.0.0.1:8788 {
             header_up Host {host}
-            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+            header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
             header_up X-Forwarded-Proto {scheme}
             header_down -Cache-Control
             transport http {
@@ -119,7 +122,8 @@ stream.hasanraza.tech, sync.nyora.xyz {
     handle {
         reverse_proxy 127.0.0.1:8788 {
             header_up Host {host}
-            header_up X-Real-IP {http.request.remote_host}
+            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+            header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
             header_up X-Forwarded-Proto {scheme}
             transport http {
                 keepalive 90s

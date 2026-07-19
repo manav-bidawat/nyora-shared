@@ -29,7 +29,7 @@ for NAME in $NYORA_LB_RECORDS; do
 
   if [ "$healthy" -eq 1 ] && [ -z "$rid" ]; then
     api -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
-        --data "{\"type\":\"A\",\"name\":\"${NAME}\",\"content\":\"${NYORA_PUBLIC_IP}\",\"ttl\":60,\"proxied\":false}" >/dev/null
+        --data "{\"type\":\"A\",\"name\":\"${NAME}\",\"content\":\"${NYORA_PUBLIC_IP}\",\"ttl\":1,\"proxied\":true}" >/dev/null
     echo "[dns-health] +added ${NAME} -> ${NYORA_PUBLIC_IP}"
   elif [ "$healthy" -eq 0 ] && [ -n "$rid" ]; then
     api -X DELETE "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${rid}" >/dev/null
