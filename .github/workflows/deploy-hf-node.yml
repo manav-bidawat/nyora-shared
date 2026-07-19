@@ -1,0 +1,95 @@
+name: Deploy HF parser node
+
+# Rebuilds nyora-helper.jar and pushes it (plus the Gradio wrapper) to the free
+# Hugging Face Space that runs the extra "lean" cluster node (mdhasanraza/nyora-one),
+# keeping its helper in lockstep with the VM nodes' `deploy-helper` roll-out. Fires
+# on the same `deploy` branch when the helper sources or the wrapper change.
+# huggingface_hub only transfers changed blobs, so an unchanged jar is a no-op.
+#
+# Secret required:
+#   HF_TOKEN — a Hugging Face WRITE token (huggingface.co/settings/tokens) with
+#              access to the mdhasanraza/nyora-one Space. NOT the `hf auth` oauth
+#              session token — CI needs a durable write token. If the secret is
+#              absent the job logs a warning and exits 0 (never blocks a deploy).
+on:
+  push:
+    branches: [deploy]
+    paths:
+      - 'src/commonMain/**'
+      - 'src/jvmMain/**'
+      - 'build.gradle.kts'
+      - 'deploy/hf-gradio-node/**'
+      - '.github/workflows/deploy-hf-node.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-hf-node
+  cancel-in-progress: true
+
+env:
+  SPACE_ID: mdhasanraza/nyora-one
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check HF_TOKEN is configured
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::warning::HF_TOKEN secret not set — skipping HF node deploy"
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/checkout@v7
+        if: ${{ env.SKIP != '1' }}
+      - uses: actions/setup-java@v5
+        if: ${{ env.SKIP != '1' }}
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        if: ${{ env.SKIP != '1' }}
+      - uses: actions/setup-python@v6
+        if: ${{ env.SKIP != '1' }}
+        with:
+          python-version: '3.12'
+
+      - name: Build nyora-helper.jar
+        if: ${{ env.SKIP != '1' }}
+        run: ./gradlew helperJar --no-daemon --console=plain
+
+      - name: Stage jar into the Space folder
+        if: ${{ env.SKIP != '1' }}
+        run: cp build/libs/nyora-helper.jar deploy/hf-gradio-node/nyora-helper.jar
+
+      - name: Upload wrapper + jar to the Space
+        if: ${{ env.SKIP != '1' }}
+        run: |
+          pip install --quiet 'huggingface_hub>=0.25'
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          url = api.upload_folder(
+              folder_path="deploy/hf-gradio-node",
+              repo_id=os.environ["SPACE_ID"],
+              repo_type="space",
+              commit_message="CI: sync helper jar + wrapper from nyora-shared",
+          )
+          print("uploaded:", url)
+          PY
+
+      - name: Wait for the Space to rebuild and answer /n/health
+        if: ${{ env.SKIP != '1' }}
+        run: |
+          # The Space rebuilds asynchronously after an upload (a few minutes), so a
+          # miss here isn't fatal — just a heads-up to check the Space if it lingers.
+          for i in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              "https://mdhasanraza-nyora-one.hf.space/n/health" || true)
+            echo "  attempt $i → HTTP $code"
+            [ "$code" = "200" ] && { echo "HF node healthy"; exit 0; }
+            sleep 15
+          done
+          echo "::warning::HF node not 200 yet — it may still be rebuilding; check the Space"
