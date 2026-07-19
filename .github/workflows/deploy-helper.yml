@@ -1,15 +1,15 @@
 name: Deploy helper → cluster
 
 # Pushing to the `deploy` branch builds nyora-helper.jar from src/ and rolls it
-# out to all THREE nodes behind api.nyora.xyz (round-robin DNS): nyora, expo-vm,
-# claw. Each runs the `nyora-parser` systemd service; after swapping the jar we
+# out to the nodes behind api.nyora.xyz (round-robin DNS): nyora, claw. Each runs
+# the `nyora-parser` systemd service; after swapping the jar we
 # run restart-helper.sh (restart → poll /health → regenerate the static catalog
 # snapshot → refresh the browse-cache sidecar).
 #
 # Repo secrets required:
 #   DEPLOY_SSH_KEY      — private key of the CI helper deploy key (in each node's
 #                         <user> authorized_keys; jar dir writable + passwordless sudo)
-#   DEPLOY_KNOWN_HOSTS  — ssh-keyscan lines for all three node IPs
+#   DEPLOY_KNOWN_HOSTS  — ssh-keyscan lines for all node IPs
 on:
   push:
     branches: [deploy]
@@ -23,15 +23,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Build nyora-helper.jar
         run: ./gradlew helperJar --no-daemon --console=plain
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nyora-helper-jar
           path: build/libs/nyora-helper.jar
@@ -48,7 +48,7 @@ jobs:
       # runtime and the IP is masked in logs — nothing sensitive in the workflow,
       # the job name, or the run logs.
       matrix:
-        node: [nyora, expo-vm, claw]
+        node: [nyora, claw]
     steps:
       - name: Resolve node from DEPLOY_NODES (mask IP in logs)
         run: |
@@ -58,8 +58,8 @@ jobs:
           echo "::add-mask::$host"
           { echo "HOST=$host"; echo "SSH_USER=$user"; echo "JAR_DIR=$dir"; } >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4   # for scripts/restart-helper.sh
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7   # for scripts/restart-helper.sh
+      - uses: actions/download-artifact@v8
         with:
           name: nyora-helper-jar
           path: artifact

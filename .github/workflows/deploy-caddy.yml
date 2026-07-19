@@ -1,7 +1,7 @@
 name: Deploy Caddy config → cluster
 
-# Rolls the per-node Caddyfiles in scripts/cluster/nodes/ out to the three nodes
-# (nyora, expo-vm, claw). Each node keeps its own file because the configs differ
+# Rolls the per-node Caddyfiles in scripts/cluster/nodes/ out to the nodes
+# (nyora, claw). Each node keeps its own file because the configs differ
 # (only nyora runs the sync vhost, etc.). The Cloudflare DNS token is NOT in these
 # files — it is {env.CF_API_TOKEN}, supplied on each node by /etc/caddy/caddy.env
 # (systemd EnvironmentFile), so nothing secret lives in the repo.
@@ -28,9 +28,9 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        node: [nyora, expo-vm, claw]
+        node: [nyora, claw]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve node from DEPLOY_NODES (mask IP)
         run: |
