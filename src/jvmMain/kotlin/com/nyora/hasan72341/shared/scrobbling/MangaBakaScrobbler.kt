@@ -119,13 +119,16 @@ class MangaBakaScrobbler(
 			if (chapter != null) put("progress_chapter", chapter)
 			if (rating != null) put("rating", (rating * 100f).toInt().coerceIn(0, 100))
 		}
-		// MangaBaka upserts and answers 201 { "status": 201, "data": true }. Use the
-		// checked call so a rejected write (bad token / payload) surfaces as an error
-		// instead of being silently reported as a successful scrobble.
-		callChecked(
-			authedBuilder().url("$API/v1/my/library/$remoteId")
-				.post(jsonBody(body, APP_JSON)).build(),
-		)
+		// POST creates a new library entry and 409s ("already have this series") if it
+		// already exists; PATCH updates an existing one. So create, then fall back to
+		// update on conflict — otherwise every scrobble after the first link failed.
+		val url = "$API/v1/my/library/$remoteId"
+		val (postCode, postBody) = callWithStatus(authedBuilder().url(url).post(jsonBody(body, APP_JSON)).build())
+		if (postCode == 409) {
+			callChecked(authedBuilder().url(url).patch(jsonBody(body, APP_JSON)).build())
+		} else if (postCode !in 200..299) {
+			error("HTTP $postCode: ${postBody.take(300)}")
+		}
 		return ScrobblingInfo(
 			service = service,
 			rateId = remoteId,

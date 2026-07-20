@@ -145,6 +145,14 @@ abstract class Scrobbler(
 		}
 	}
 
+	/** Execute [request] and return (status code, body) without throwing, so a
+	 *  caller can branch on the status (e.g. create-vs-update on a 409 conflict). */
+	protected suspend fun callWithStatus(request: Request): Pair<Int, String> = withContext(Dispatchers.IO) {
+		http.newCall(request).execute().use { resp ->
+			resp.code to resp.body?.string().orEmpty()
+		}
+	}
+
 	protected suspend fun callJson(request: Request): JsonObject {
 		val text = call(request)
 		return parseObject(text)
