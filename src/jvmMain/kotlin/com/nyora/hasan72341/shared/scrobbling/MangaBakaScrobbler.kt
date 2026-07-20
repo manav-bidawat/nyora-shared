@@ -119,8 +119,10 @@ class MangaBakaScrobbler(
 			if (chapter != null) put("progress_chapter", chapter)
 			if (rating != null) put("rating", (rating * 100f).toInt().coerceIn(0, 100))
 		}
-		// MangaBaka upserts and answers 201 { "status": 201, "data": true }.
-		call(
+		// MangaBaka upserts and answers 201 { "status": 201, "data": true }. Use the
+		// checked call so a rejected write (bad token / payload) surfaces as an error
+		// instead of being silently reported as a successful scrobble.
+		callChecked(
 			authedBuilder().url("$API/v1/my/library/$remoteId")
 				.post(jsonBody(body, APP_JSON)).build(),
 		)

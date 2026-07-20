@@ -134,6 +134,17 @@ abstract class Scrobbler(
 		}
 	}
 
+	/** Like [call] but throws with the status + body when the response isn't 2xx,
+	 *  so a rejected write (a tracker refusing a scrobble) surfaces as a failure
+	 *  instead of being silently swallowed and reported as success. */
+	protected suspend fun callChecked(request: Request): String = withContext(Dispatchers.IO) {
+		http.newCall(request).execute().use { resp ->
+			val body = resp.body?.string().orEmpty()
+			if (!resp.isSuccessful) error("HTTP ${resp.code}: ${body.take(300)}")
+			body
+		}
+	}
+
 	protected suspend fun callJson(request: Request): JsonObject {
 		val text = call(request)
 		return parseObject(text)

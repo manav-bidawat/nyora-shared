@@ -1851,8 +1851,8 @@ class NyoraRestServer(
             runBlocking {
                 scrobbler.updateProgress(mediaId, chapter = progress, status = status, rating = rating, comment = null)
             }
-        } catch (_: Exception) {
-            return respondError(exchange, 502, "Tracker update failed")
+        } catch (e: Exception) {
+            return respondError(exchange, 502, "Tracker update failed: ${e.message}")
         }
         val out = buildJsonObject {
             put("ok", true)
