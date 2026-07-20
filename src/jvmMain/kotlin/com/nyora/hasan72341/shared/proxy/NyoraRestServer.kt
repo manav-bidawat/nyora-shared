@@ -2214,7 +2214,10 @@ class NyoraRestServer(
         if (error != null) frag.append("&error=").append(urlEncode(error))
         // location.replace (not a Location header) so the token never lands in an
         // intermediary's access log; oauth.html scrubs it from history on arrival.
-        val target = "$origin/oauth.html#$frag"
+        // The ?t= cache-buster makes each relay a unique URL so the app's service
+        // worker (stale-while-revalidate on navigations) and any edge cache can't
+        // serve a stale oauth.html — we must always run the current relay script.
+        val target = "$origin/oauth.html?t=${System.currentTimeMillis()}#$frag"
         respondHtml(exchange, 200,
             "<!doctype html><html><body>Connecting…<script>location.replace(${oauthJsStr(target)})</script></body></html>")
     }
