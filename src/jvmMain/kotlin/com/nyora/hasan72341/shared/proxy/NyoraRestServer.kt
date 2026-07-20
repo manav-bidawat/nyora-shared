@@ -26,6 +26,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
@@ -170,14 +171,35 @@ class NyoraRestServer(
             guardedContext("/manga/alternatives") { handleAlternatives(it) }
             guardedContext("/backup/export") { handleBackupExport(it) }
             guardedContext("/backup/import") { handleBackupImport(it) }
-            guardedContext("/tracker/anilist/search") { handleAniListSearch(it) }
-            guardedContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
-            guardedContext("/tracker/myanimelist/search") { handleMalSearch(it) }
-            guardedContext("/tracker/myanimelist/scrobble") { handleMalScrobble(it) }
-            guardedContext("/tracker/kitsu/search") { handleKitsuSearch(it) }
-            guardedContext("/tracker/kitsu/scrobble") { handleKitsuScrobble(it) }
-            guardedContext("/tracker/shikimori/search") { handleShikimoriSearch(it) }
-            guardedContext("/tracker/shikimori/scrobble") { handleShikimoriScrobble(it) }
+            guardedContext("/tracker/anilist/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/anilist/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/myanimelist/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/myanimelist/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/kitsu/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/kitsu/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/shikimori/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/shikimori/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/bangumi/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/bangumi/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/mangabaka/search") { handleTrackerSearch(it) }
+            guardedContext("/tracker/mangabaka/scrobble") { handleTrackerScrobble(it) }
+            guardedContext("/tracker/anilist/state") { handleTrackerState(it) }
+            guardedContext("/tracker/myanimelist/state") { handleTrackerState(it) }
+            guardedContext("/tracker/kitsu/state") { handleTrackerState(it) }
+            guardedContext("/tracker/shikimori/state") { handleTrackerState(it) }
+            guardedContext("/tracker/bangumi/state") { handleTrackerState(it) }
+            guardedContext("/tracker/mangabaka/state") { handleTrackerState(it) }
+            guardedContext("/tracker/anilist/authorize") { handleTrackerAuthorize(it) }
+            guardedContext("/tracker/anilist/callback") { handleTrackerCallback(it) }
+            guardedContext("/tracker/myanimelist/authorize") { handleTrackerAuthorize(it) }
+            guardedContext("/tracker/myanimelist/callback") { handleTrackerCallback(it) }
+            guardedContext("/tracker/shikimori/authorize") { handleTrackerAuthorize(it) }
+            guardedContext("/tracker/shikimori/callback") { handleTrackerCallback(it) }
+            guardedContext("/tracker/bangumi/authorize") { handleTrackerAuthorize(it) }
+            guardedContext("/tracker/bangumi/callback") { handleTrackerCallback(it) }
+            guardedContext("/tracker/mangabaka/authorize") { handleTrackerAuthorize(it) }
+            guardedContext("/tracker/mangabaka/callback") { handleTrackerCallback(it) }
+            guardedContext("/tracker/kitsu/login") { handleKitsuLogin(it) }
             guardedContext("/supabase/status") { handleSupabaseStatus(it) }
             guardedContext("/supabase/signin") { handleSupabaseSignIn(it) }
             guardedContext("/supabase/register") { handleSupabaseRegister(it) }
@@ -377,7 +399,7 @@ class NyoraRestServer(
         val origin = allowedCorsOrigin(exchange) ?: return
         headers.add("Access-Control-Allow-Origin", origin)
         headers.add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        headers.add("Access-Control-Allow-Headers", "Content-Type")
+        headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
     }
 
     /** If this is a CORS preflight (OPTIONS), answer it 204 with CORS headers and
@@ -1740,6 +1762,378 @@ class NyoraRestServer(
             put("isActive", false)
         })
     }
+
+    // ----- Trackers (generic, all services) -----
+    //
+    // Every tracker — AniList / MyAnimeList / Kitsu / Shikimori / Bangumi /
+    // MangaBaka — runs through the shared android-ported Scrobbler in the
+    // scrobbling package. The desktop app holds each service's OAuth access
+    // token (Keychain-backed in Swift) and sends it as `Authorization: Bearer`
+    // on every call, so nothing is persisted helper-side: we build a throwaway
+    // scrobbler seeded with that token per request. The scrobbler performs the
+    // service-specific search + create-or-update (including Kitsu / Shikimori
+    // user-id + rate-id resolution) internally, and we return a normalized JSON
+    // shape the Swift client parses uniformly for every service.
+
+    private val scrobblerHttp by lazy { okhttp3.OkHttpClient() }
+
+    /// The `<slug>` in `/tracker/<slug>/{search,scrobble}`.
+    private fun trackerSlug(exchange: HttpExchange): String? =
+        exchange.requestURI.path.split('/').getOrNull(2)?.takeIf { it.isNotBlank() }
+
+    private fun scrobblerForRequest(
+        exchange: HttpExchange,
+        token: String,
+    ): com.nyora.hasan72341.shared.scrobbling.Scrobbler? {
+        val svc = com.nyora.hasan72341.shared.scrobbling.ScrobblerService.fromSlug(trackerSlug(exchange))
+            ?: return null
+        val store = com.nyora.hasan72341.shared.scrobbling.InMemoryScrobblerTokenStore(accessToken = token)
+        return com.nyora.hasan72341.shared.scrobbling.ScrobblerRepository.create(svc, store, scrobblerHttp)
+    }
+
+    private fun handleTrackerSearch(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing tracker token")
+        val title = exchange.query()["title"]?.takeIf { it.isNotBlank() }
+            ?: return respondError(exchange, 400, "Missing 'title'")
+        val scrobbler = scrobblerForRequest(exchange, token)
+            ?: return respondError(exchange, 404, "Unknown tracker")
+        val results = try {
+            runBlocking { scrobbler.search(title) }
+        } catch (_: Exception) {
+            return respondError(exchange, 502, "Tracker search failed")
+        }
+        val out = buildJsonObject {
+            putJsonArray("results") {
+                results.take(10).forEach { m ->
+                    add(
+                        buildJsonObject {
+                            put("id", m.id)
+                            put("title", m.name)
+                            m.altName?.let { put("altTitle", it) }
+                            m.cover?.let { put("cover", it) }
+                            put("url", m.url)
+                        },
+                    )
+                }
+            }
+        }
+        respondJson(exchange, 200, out)
+    }
+
+    private fun handleTrackerScrobble(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing tracker token")
+        val params = exchange.query()
+        val mediaId = params["mediaId"]?.toLongOrNull()
+            ?: return respondError(exchange, 400, "Missing 'mediaId'")
+        val progress = params["progress"]?.toIntOrNull()
+        val rating = params["rating"]?.toFloatOrNull()
+        val status = com.nyora.hasan72341.shared.scrobbling.ScrobblingStatus.fromCanonical(params["status"])
+            ?: com.nyora.hasan72341.shared.scrobbling.ScrobblingStatus.READING
+        val scrobbler = scrobblerForRequest(exchange, token)
+            ?: return respondError(exchange, 404, "Unknown tracker")
+        val info = try {
+            runBlocking {
+                scrobbler.updateProgress(mediaId, chapter = progress, status = status, rating = rating, comment = null)
+            }
+        } catch (_: Exception) {
+            return respondError(exchange, 502, "Tracker update failed")
+        }
+        val out = buildJsonObject {
+            put("ok", true)
+            put("rateId", info.rateId)
+            put("progress", info.chapter)
+            info.status?.let { put("status", it.canonical) }
+        }
+        respondJson(exchange, 200, out)
+    }
+
+    // Current tracking state for a linked media id (status / progress / score),
+    // so clients can render + edit a manga's tracking without a local cache.
+    private fun handleTrackerState(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
+        if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val token = bearerOrNull(exchange) ?: return respondError(exchange, 401, "Missing tracker token")
+        val mediaId = exchange.query()["mediaId"]?.toLongOrNull()
+            ?: return respondError(exchange, 400, "Missing 'mediaId'")
+        val scrobbler = scrobblerForRequest(exchange, token)
+            ?: return respondError(exchange, 404, "Unknown tracker")
+        val info = try {
+            runBlocking { scrobbler.getState(mediaId) }
+        } catch (_: Exception) {
+            return respondError(exchange, 502, "Tracker state failed")
+        }
+        val out = if (info == null) {
+            buildJsonObject { put("linked", false) }
+        } else {
+            buildJsonObject {
+                put("linked", true)
+                put("mediaId", info.remoteId)
+                info.status?.let { put("status", it.canonical) }
+                put("progress", info.chapter)
+                put("score", info.rating) // 0f..1f
+                put("title", info.title)
+                info.coverUrl?.let { put("cover", it) }
+                put("url", info.url)
+            }
+        }
+        respondJson(exchange, 200, out)
+    }
+
+    // ----- Tracker OAuth bridge (server-side login for web / thin clients) -----
+    //
+    // Lets a browser log in to a tracker without hitting CORS or exposing client
+    // secrets. The client opens /tracker/<slug>/authorize in a popup; we 302 it
+    // to the provider consent page (redirect_uri points back at /callback here).
+    // The provider returns to /tracker/<slug>/callback, we run the PKCE / secret
+    // code exchange server-side and serve a tiny page that postMessages the token
+    // back to the opener. AniList uses the implicit grant (token in the URL
+    // fragment) so its callback reads the fragment client-side. Kitsu uses a
+    // password grant via POST /tracker/kitsu/login (no popup).
+    //
+    // OAuth apps must be registered with redirect
+    // https://<helper>/tracker/<slug>/callback; client ids/secrets come from env
+    // NYORA_TRK_<SLUG>_ID / NYORA_TRK_<SLUG>_SECRET.
+
+    private data class TrackerAuth(
+        val slug: String,
+        val authorizeUrl: String,
+        val tokenUrl: String,
+        val responseType: String, // "code" | "token"
+        val pkce: String?,        // null | "plain" | "S256"
+        val scope: String?,       // appended raw (mangabaka uses '+')
+        val userAgent: String?,
+        val needsSecret: Boolean,
+    )
+
+    private val trackerAuthConfig: Map<String, TrackerAuth> = mapOf(
+        "anilist" to TrackerAuth(
+            "anilist", "https://anilist.co/api/v2/oauth/authorize",
+            "https://anilist.co/api/v2/oauth/token", "token", null, null, null, false,
+        ),
+        "myanimelist" to TrackerAuth(
+            "myanimelist", "https://myanimelist.net/v1/oauth2/authorize",
+            "https://myanimelist.net/v1/oauth2/token", "code", "plain", null, null, true,
+        ),
+        "shikimori" to TrackerAuth(
+            "shikimori", "https://shikimori.io/oauth/authorize",
+            "https://shikimori.io/oauth/token", "code", null, "user_rates", "Nyora", true,
+        ),
+        "bangumi" to TrackerAuth(
+            "bangumi", "https://bgm.tv/oauth/authorize",
+            "https://bgm.tv/oauth/access_token", "code", null, null,
+            "Nyora (https://github.com/Nyora-Manga)", true,
+        ),
+        "mangabaka" to TrackerAuth(
+            "mangabaka", "https://mangabaka.org/auth/oauth2/authorize",
+            "https://mangabaka.org/auth/oauth2/token", "code", "S256",
+            "library.read+library.write+profile+offline_access+openid", null, false,
+        ),
+    )
+
+    private data class PendingAuth(val slug: String, val verifier: String?, val createdAt: Long)
+    private val pendingAuth = java.util.concurrent.ConcurrentHashMap<String, PendingAuth>()
+
+    private fun trackerEnv(slug: String, suffix: String): String? =
+        System.getenv("NYORA_TRK_${slug.uppercase()}_$suffix")?.takeIf { it.isNotBlank() }
+
+    private fun oauthPublicBaseUrl(exchange: HttpExchange): String {
+        System.getenv("NYORA_PUBLIC_URL")?.takeIf { it.isNotBlank() }?.let { return it.trimEnd('/') }
+        val proto = exchange.requestHeaders.getFirst("X-Forwarded-Proto") ?: "https"
+        val host = exchange.requestHeaders.getFirst("X-Forwarded-Host")
+            ?: exchange.requestHeaders.getFirst("Host") ?: "localhost"
+        return "$proto://$host"
+    }
+
+    private fun oauthPathSlug(exchange: HttpExchange): String? =
+        exchange.requestURI.path.split('/').getOrNull(2)?.takeIf { it.isNotBlank() }
+
+    private fun oauthRandomToken(): String {
+        val bytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(bytes)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
+
+    private fun oauthS256(verifier: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(verifier.toByteArray(StandardCharsets.UTF_8))
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+    }
+
+    private fun handleTrackerAuthorize(exchange: HttpExchange) {
+        val slug = oauthPathSlug(exchange) ?: return respondError(exchange, 400, "bad slug")
+        val cfg = trackerAuthConfig[slug] ?: return respondError(exchange, 404, "unknown tracker")
+        val clientId = trackerEnv(slug, "ID")
+            ?: return respondError(exchange, 501, "tracker '$slug' is not configured on this server")
+        val state = oauthRandomToken()
+        val redirectUri = "${oauthPublicBaseUrl(exchange)}/tracker/$slug/callback"
+        val sb = StringBuilder(cfg.authorizeUrl)
+        sb.append("?client_id=").append(urlEncode(clientId))
+        sb.append("&redirect_uri=").append(urlEncode(redirectUri))
+        sb.append("&response_type=").append(cfg.responseType)
+        sb.append("&state=").append(urlEncode(state))
+        var verifier: String? = null
+        if (cfg.pkce != null) {
+            verifier = oauthRandomToken()
+            val challenge = if (cfg.pkce == "S256") oauthS256(verifier) else verifier
+            sb.append("&code_challenge=").append(urlEncode(challenge))
+            sb.append("&code_challenge_method=").append(cfg.pkce)
+        }
+        if (cfg.scope != null) sb.append("&scope=").append(cfg.scope)
+        // Prune expired pending auths (>10 min) and record this one.
+        val cutoff = System.currentTimeMillis() - 600_000L
+        pendingAuth.entries.removeIf { it.value.createdAt < cutoff }
+        pendingAuth[state] = PendingAuth(slug, verifier, System.currentTimeMillis())
+        applyCors(exchange)
+        exchange.responseHeaders.add("Location", sb.toString())
+        exchange.sendResponseHeaders(302, -1)
+        exchange.close()
+    }
+
+    private fun handleTrackerCallback(exchange: HttpExchange) {
+        val slug = oauthPathSlug(exchange) ?: return respondText(exchange, 400, "bad slug")
+        val cfg = trackerAuthConfig[slug]
+        // AniList (implicit): the token is in the URL fragment, invisible server-side.
+        if (cfg != null && cfg.responseType == "token") {
+            respondHtml(exchange, 200, oauthImplicitCallbackHtml(slug))
+            return
+        }
+        val params = exchange.query()
+        val err = params["error"]
+        val code = params["code"]
+        val state = params["state"]
+        if (cfg == null || err != null || code.isNullOrBlank() || state.isNullOrBlank()) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, err ?: "no_code"))
+            return
+        }
+        val pending = pendingAuth.remove(state)
+        if (pending == null || pending.slug != slug) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_state"))
+            return
+        }
+        val raw = try {
+            val clientId = trackerEnv(slug, "ID") ?: error("no client id")
+            val redirectUri = "${oauthPublicBaseUrl(exchange)}/tracker/$slug/callback"
+            val form = StringBuilder()
+            fun add(k: String, v: String) {
+                if (form.isNotEmpty()) form.append('&')
+                form.append(urlEncode(k)).append('=').append(urlEncode(v))
+            }
+            add("grant_type", "authorization_code")
+            add("client_id", clientId)
+            add("code", code)
+            add("redirect_uri", redirectUri)
+            if (cfg.needsSecret) add("client_secret", trackerEnv(slug, "SECRET") ?: error("no secret"))
+            if (pending.verifier != null) add("code_verifier", pending.verifier)
+            serviceRequest(
+                url = cfg.tokenUrl,
+                method = "POST",
+                bearer = null,
+                body = form.toString().toByteArray(StandardCharsets.UTF_8),
+                contentType = "application/x-www-form-urlencoded",
+                accept = "application/json",
+                userAgent = cfg.userAgent,
+            ) ?: error("token request failed")
+        } catch (_: Exception) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "exchange_failed"))
+            return
+        }
+        val obj = try {
+            json.parseToJsonElement(raw).jsonObject
+        } catch (_: Exception) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_token_response"))
+            return
+        }
+        respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, obj, null))
+    }
+
+    private fun handleKitsuLogin(exchange: HttpExchange) {
+        if (maybePreflight(exchange)) return
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val creds = try {
+            json.parseToJsonElement(exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8)).jsonObject
+        } catch (_: Exception) {
+            return respondError(exchange, 400, "bad body")
+        }
+        val username = creds["username"]?.jsonPrimitive?.contentOrNull
+            ?: return respondError(exchange, 400, "missing username")
+        val password = creds["password"]?.jsonPrimitive?.contentOrNull
+            ?: return respondError(exchange, 400, "missing password")
+        val form = "grant_type=password&username=${urlEncode(username)}&password=${urlEncode(password)}" +
+            "&client_id=dd031b32d2f56c990b1425efe6c42ad847e7fe3ab46bf1299f05ecd856bdb7dd" +
+            "&client_secret=54d7307928f63414defd96399fc31ba847961ceaecef3a5fd93144e960c0e151"
+        val resp = serviceRequest(
+            url = "https://kitsu.app/api/oauth/token",
+            method = "POST",
+            bearer = null,
+            body = form.toByteArray(StandardCharsets.UTF_8),
+            contentType = "application/x-www-form-urlencoded",
+            accept = "application/json",
+            userAgent = null,
+        ) ?: return respondError(exchange, 502, "kitsu login failed")
+        respondJsonRaw(exchange, 200, resp)
+    }
+
+    private fun oauthImplicitCallbackHtml(slug: String): String = """<!doctype html>
+<html><body>Connecting…<script>
+(function(){
+  var h = new URLSearchParams((location.hash||'').replace(/^#/,''));
+  var msg = { source:'nyora-tracker', slug:${oauthJsStr(slug)} };
+  var t = h.get('access_token');
+  if (t) { msg.access_token = t; } else { msg.error = h.get('error') || 'no_token'; }
+  var st = h.get('state'); if (st) msg.state = st;
+  try { if (window.opener) window.opener.postMessage(msg, '*'); } catch(e){}
+  document.body.textContent = t ? 'Connected. You can close this window.' : 'Sign-in failed.';
+  setTimeout(function(){ try{ window.close(); }catch(e){} }, 400);
+})();
+</script></body></html>"""
+
+    private fun oauthTokenCallbackHtml(slug: String, state: String?, token: JsonObject?, error: String?): String {
+        val payload = buildJsonObject {
+            put("source", "nyora-tracker")
+            put("slug", slug)
+            if (state != null) put("state", state)
+            if (error != null) put("error", error)
+            val access = token?.get("access_token")?.jsonPrimitive?.contentOrNull
+            val refresh = token?.get("refresh_token")?.jsonPrimitive?.contentOrNull
+            if (access != null) put("access_token", access)
+            if (refresh != null) put("refresh_token", refresh)
+        }
+        val payloadJson = json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), payload)
+            .replace("<", "\\u003c")
+        return """<!doctype html>
+<html><body>Connecting…<script>
+(function(){
+  var msg = $payloadJson;
+  try { if (window.opener) window.opener.postMessage(msg, '*'); } catch(e){}
+  document.body.textContent = msg.error ? 'Sign-in failed.' : 'Connected. You can close this window.';
+  setTimeout(function(){ try{ window.close(); }catch(e){} }, 400);
+})();
+</script></body></html>"""
+    }
+
+    private fun oauthJsStr(s: String): String =
+        "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("<", "\\u003c") + "\""
+
+    private fun respondHtml(exchange: HttpExchange, status: Int, html: String) {
+        val bytes = html.toByteArray(StandardCharsets.UTF_8)
+        applyCors(exchange)
+        exchange.responseHeaders.add("Content-Type", "text/html; charset=utf-8")
+        exchange.sendResponseHeaders(status, bytes.size.toLong())
+        exchange.responseBody.use { it.write(bytes) }
+    }
+
 
     // ----- Tracker: AniList -----
     //

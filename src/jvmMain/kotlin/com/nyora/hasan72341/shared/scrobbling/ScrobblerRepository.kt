@@ -17,16 +17,7 @@ class ScrobblerRepository(
 
 	private val scrobblers: Map<ScrobblerService, Scrobbler> = buildMap {
 		for (svc in ScrobblerService.entries) {
-			val store = tokenStoreFactory(svc)
-			put(
-				svc,
-				when (svc) {
-					ScrobblerService.ANILIST -> AniListScrobbler(store, http)
-					ScrobblerService.MAL -> MalScrobbler(store, http)
-					ScrobblerService.KITSU -> KitsuScrobbler(store, http)
-					ScrobblerService.SHIKIMORI -> ShikimoriScrobbler(store, http)
-				},
-			)
+			put(svc, create(svc, tokenStoreFactory(svc), http))
 		}
 	}
 
@@ -51,5 +42,16 @@ class ScrobblerRepository(
 		 */
 		fun persistent(http: OkHttpClient = OkHttpClient()): ScrobblerRepository =
 			ScrobblerRepository(http) { PersistentScrobblerTokenStore(it) }
+
+		/** Build a single scrobbler for [service] backed by [tokens]. */
+		fun create(service: ScrobblerService, tokens: ScrobblerTokenStore, http: OkHttpClient): Scrobbler =
+			when (service) {
+				ScrobblerService.ANILIST -> AniListScrobbler(tokens, http)
+				ScrobblerService.MAL -> MalScrobbler(tokens, http)
+				ScrobblerService.KITSU -> KitsuScrobbler(tokens, http)
+				ScrobblerService.SHIKIMORI -> ShikimoriScrobbler(tokens, http)
+				ScrobblerService.BANGUMI -> BangumiScrobbler(tokens, http)
+				ScrobblerService.MANGABAKA -> MangaBakaScrobbler(tokens, http)
+			}
 	}
 }
