@@ -34,6 +34,11 @@ class KitsuScrobbler(
 
 	private var cachedUserId: Long? = null
 
+	// Kitsu is JSON:API: it 406s any request whose Accept isn't
+	// application/vnd.api+json. authedBuilder() sets Accept: application/json, so
+	// every Kitsu call must override it — otherwise search/state/create all fail.
+	private fun kitsuBuilder(): Request.Builder = authedBuilder().header("Accept", VND_JSON)
+
 	// Kitsu uses a resource-owner password grant (no browser redirect); the
 	// desktop UI collects username+password and calls ScrobblerOAuth.loginWithPassword.
 	override val defaultRedirectUri: String = "nyora+kitsu://auth"
@@ -62,7 +67,7 @@ class KitsuScrobbler(
 
 	override suspend fun loadUser(): ScrobblerUser {
 		val user = callJson(
-			authedBuilder().url("$WEB/api/edge/users?filter[self]=true").get().build(),
+			kitsuBuilder().url("$WEB/api/edge/users?filter[self]=true").get().build(),
 		).arr("data")?.firstOrNull() as? JsonObject ?: error("Kitsu: no user")
 		val attrs = user.obj("attributes")
 		val id = user.str("id")?.toLongOrNull() ?: 0L
@@ -81,7 +86,7 @@ class KitsuScrobbler(
 			.addQueryParameter("page[offset]", offset.toString())
 			.addQueryParameter("filter[text]", query)
 			.build()
-		val resp = callJson(authedBuilder().url(url).get().build())
+		val resp = callJson(kitsuBuilder().url(url).get().build())
 		return resp.arr("data").orEmpty().mapNotNull { el ->
 			val jo = el as? JsonObject ?: return@mapNotNull null
 			val attrs = jo.obj("attributes") ?: return@mapNotNull null
@@ -101,7 +106,7 @@ class KitsuScrobbler(
 
 	override suspend fun getMangaInfo(remoteId: Long): ScrobblerMangaInfo {
 		val data = callJson(
-			authedBuilder().url("$WEB/api/edge/manga/$remoteId").get().build(),
+			kitsuBuilder().url("$WEB/api/edge/manga/$remoteId").get().build(),
 		).obj("data") ?: error("Kitsu: manga $remoteId not found")
 		val attrs = data.obj("attributes")
 		return ScrobblerMangaInfo(
@@ -140,7 +145,7 @@ class KitsuScrobbler(
 			.addQueryParameter("filter[manga_id]", remoteId.toString())
 			.addQueryParameter("filter[userId]", userId.toString())
 			.build()
-		return callJson(authedBuilder().url(url).get().build())
+		return callJson(kitsuBuilder().url(url).get().build())
 			.arr("data")?.firstOrNull() as? JsonObject
 	}
 
@@ -172,7 +177,7 @@ class KitsuScrobbler(
 			}
 		}
 		return callJson(
-			authedBuilder().url("$WEB/api/edge/library-entries")
+			kitsuBuilder().url("$WEB/api/edge/library-entries")
 				.post(jsonBody(payload, VND_JSON)).build(),
 		).obj("data") ?: error("Kitsu: create failed")
 	}
