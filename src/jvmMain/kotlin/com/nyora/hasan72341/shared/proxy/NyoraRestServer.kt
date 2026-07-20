@@ -1940,8 +1940,6 @@ class NyoraRestServer(
         ),
     )
 
-    private data class PendingAuth(val slug: String, val verifier: String?, val createdAt: Long)
-    private val pendingAuth = java.util.concurrent.ConcurrentHashMap<String, PendingAuth>()
 
     private fun trackerEnv(slug: String, suffix: String): String? =
         System.getenv("NYORA_TRK_${slug.uppercase()}_$suffix")?.takeIf { it.isNotBlank() }
@@ -1969,18 +1967,66 @@ class NyoraRestServer(
         return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
     }
 
+    // Stateless OAuth `state`: the slug + PKCE verifier + issue time are AES-GCM
+    // sealed *into* the state param, so any cluster node can finish the callback
+    // without shared storage (api.nyora.xyz is round-robin, so the callback may
+    // land on a different node than the authorize did). The key is shared across
+    // nodes via NYORA_OAUTH_STATE_KEY; absent it we use a per-process key, which
+    // is fine for a single node / local dev. Sealing also gives CSRF integrity
+    // (only a holder of the key can mint a valid state) and keeps the S256
+    // verifier encrypted rather than exposed in the redirect URL.
+    private val oauthStateKey: javax.crypto.SecretKey by lazy {
+        val secret = System.getenv("NYORA_OAUTH_STATE_KEY")?.takeIf { it.isNotBlank() }
+            ?.toByteArray(StandardCharsets.UTF_8)
+            ?: ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        val keyBytes = java.security.MessageDigest.getInstance("SHA-256").digest(secret)
+        javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
+    }
+
+    private data class SealedState(val slug: String, val verifier: String?)
+
+    private fun oauthSealState(slug: String, verifier: String?): String {
+        val payload = buildJsonObject {
+            put("s", slug)
+            if (verifier != null) put("v", verifier)
+            put("t", System.currentTimeMillis())
+        }.toString().toByteArray(StandardCharsets.UTF_8)
+        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, oauthStateKey, javax.crypto.spec.GCMParameterSpec(128, iv))
+        val ct = cipher.doFinal(payload)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(iv + ct)
+    }
+
+    private fun oauthOpenState(state: String?, maxAgeMs: Long = 600_000L): SealedState? {
+        if (state.isNullOrBlank()) return null
+        return try {
+            val raw = java.util.Base64.getUrlDecoder().decode(state)
+            if (raw.size < 12 + 16) return null // iv + GCM tag
+            val iv = raw.copyOfRange(0, 12)
+            val ct = raw.copyOfRange(12, raw.size)
+            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, oauthStateKey, javax.crypto.spec.GCMParameterSpec(128, iv))
+            val obj = json.parseToJsonElement(cipher.doFinal(ct).toString(StandardCharsets.UTF_8)).jsonObject
+            val t = obj["t"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: return null
+            if (System.currentTimeMillis() - t > maxAgeMs) return null
+            val slug = obj["s"]?.jsonPrimitive?.contentOrNull ?: return null
+            SealedState(slug, obj["v"]?.jsonPrimitive?.contentOrNull)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun handleTrackerAuthorize(exchange: HttpExchange) {
         val slug = oauthPathSlug(exchange) ?: return respondError(exchange, 400, "bad slug")
         val cfg = trackerAuthConfig[slug] ?: return respondError(exchange, 404, "unknown tracker")
         val clientId = trackerEnv(slug, "ID")
             ?: return respondError(exchange, 501, "tracker '$slug' is not configured on this server")
-        val state = oauthRandomToken()
         val redirectUri = "${oauthPublicBaseUrl(exchange)}/tracker/$slug/callback"
         val sb = StringBuilder(cfg.authorizeUrl)
         sb.append("?client_id=").append(urlEncode(clientId))
         sb.append("&redirect_uri=").append(urlEncode(redirectUri))
         sb.append("&response_type=").append(cfg.responseType)
-        sb.append("&state=").append(urlEncode(state))
         var verifier: String? = null
         if (cfg.pkce != null) {
             verifier = oauthRandomToken()
@@ -1988,11 +2034,11 @@ class NyoraRestServer(
             sb.append("&code_challenge=").append(urlEncode(challenge))
             sb.append("&code_challenge_method=").append(cfg.pkce)
         }
+        // Stateless: seal slug + verifier + issue-time into `state` (no server-side
+        // store), so the callback can land on any cluster node and still complete.
+        val state = oauthSealState(slug, verifier)
+        sb.append("&state=").append(urlEncode(state))
         if (cfg.scope != null) sb.append("&scope=").append(cfg.scope)
-        // Prune expired pending auths (>10 min) and record this one.
-        val cutoff = System.currentTimeMillis() - 600_000L
-        pendingAuth.entries.removeIf { it.value.createdAt < cutoff }
-        pendingAuth[state] = PendingAuth(slug, verifier, System.currentTimeMillis())
         applyCors(exchange)
         exchange.responseHeaders.add("Location", sb.toString())
         exchange.sendResponseHeaders(302, -1)
@@ -2015,8 +2061,8 @@ class NyoraRestServer(
             respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, err ?: "no_code"))
             return
         }
-        val pending = pendingAuth.remove(state)
-        if (pending == null || pending.slug != slug) {
+        val sealed = oauthOpenState(state)
+        if (sealed == null || sealed.slug != slug) {
             respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_state"))
             return
         }
@@ -2033,7 +2079,7 @@ class NyoraRestServer(
             add("code", code)
             add("redirect_uri", redirectUri)
             if (cfg.needsSecret) add("client_secret", trackerEnv(slug, "SECRET") ?: error("no secret"))
-            if (pending.verifier != null) add("code_verifier", pending.verifier)
+            if (sealed.verifier != null) add("code_verifier", sealed.verifier)
             serviceRequest(
                 url = cfg.tokenUrl,
                 method = "POST",
