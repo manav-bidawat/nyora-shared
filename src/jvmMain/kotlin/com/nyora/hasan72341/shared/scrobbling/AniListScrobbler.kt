@@ -92,6 +92,7 @@ class AniListScrobbler(
 				}
 			}
 			""",
+			authed = false,
 		).obj("data")?.obj("Page")?.arr("media").orEmpty()
 		return data.mapNotNull { el ->
 			val jo = el as? JsonObject ?: return@mapNotNull null
@@ -115,6 +116,7 @@ class AniListScrobbler(
 				id title { userPreferred } coverImage { large } description siteUrl
 			}
 			""",
+			authed = false,
 		).obj("data")?.obj("Media") ?: error("AniList: media $remoteId not found")
 		return ScrobblerMangaInfo(
 			id = media.long("id") ?: remoteId,
@@ -190,16 +192,19 @@ class AniListScrobbler(
 
 	// ── GraphQL plumbing ──────────────────────────────────────────────────────
 
-	private suspend fun query(payload: String): JsonObject = graphql("query", payload)
-	private suspend fun mutation(payload: String): JsonObject = graphql("mutation", payload)
+	private suspend fun query(payload: String, authed: Boolean = true): JsonObject = graphql("query", payload, authed)
+	private suspend fun mutation(payload: String): JsonObject = graphql("mutation", payload, true)
 
-	private suspend fun graphql(type: String, payload: String): JsonObject {
+	private suspend fun graphql(type: String, payload: String, authed: Boolean = true): JsonObject {
 		val body = buildJsonObject {
 			put("query", "$type { ${payload.replace(Regex("\\s+"), " ").trim()} }")
 		}
-		return callJson(
-			authedBuilder().url(ENDPOINT).post(jsonBody(body)).build(),
-		)
+		// AniList rejects the ENTIRE query with "Invalid token" if the Authorization
+		// header carries an invalid/expired token — even for public reads like
+		// search. So public queries must be sent unauthenticated; only mutations and
+		// the viewer's own list actually need the token.
+		val builder = if (authed) authedBuilder() else Request.Builder().header("Accept", "application/json")
+		return callJson(builder.url(ENDPOINT).post(jsonBody(body)).build())
 	}
 
 	private fun quote(value: String): String =
