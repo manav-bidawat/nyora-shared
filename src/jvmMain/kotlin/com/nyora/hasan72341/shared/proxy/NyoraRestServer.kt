@@ -1916,9 +1916,12 @@ class NyoraRestServer(
     )
 
     private val trackerAuthConfig: Map<String, TrackerAuth> = mapOf(
+        // AniList app 46414 is a confidential ("web") client — it does NOT allow
+        // the implicit grant (response_type=token → unsupported_grant_type after
+        // consent). Use the authorization-code flow with the client secret.
         "anilist" to TrackerAuth(
             "anilist", "https://anilist.co/api/v2/oauth/authorize",
-            "https://anilist.co/api/v2/oauth/token", "token", null, null, null, false,
+            "https://anilist.co/api/v2/oauth/token", "code", null, null, null, true,
         ),
         "myanimelist" to TrackerAuth(
             "myanimelist", "https://myanimelist.net/v1/oauth2/authorize",
