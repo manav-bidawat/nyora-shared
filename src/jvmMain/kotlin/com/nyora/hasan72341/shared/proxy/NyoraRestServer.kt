@@ -1986,12 +1986,25 @@ class NyoraRestServer(
         javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
     }
 
-    private data class SealedState(val slug: String, val verifier: String?)
+    private data class SealedState(val slug: String, val verifier: String?, val origin: String?)
 
-    private fun oauthSealState(slug: String, verifier: String?): String {
+    // A web caller passes ?ro=<its origin> so the callback can relay the token back
+    // through that origin (BroadcastChannel), which survives a provider's COOP that
+    // nulls window.opener. Only ever relay to our own origins — never an
+    // attacker-controlled one (open-redirect / token exfiltration).
+    private val allowedOriginRe =
+        Regex("^https://([a-z0-9-]+\\.)*nyora\\.xyz$|^https?://(localhost|127\\.0\\.0\\.1)(:\\d{1,5})?$")
+
+    private fun oauthAllowedOrigin(raw: String): String? {
+        val o = raw.trim().trimEnd('/')
+        return if (allowedOriginRe.matches(o)) o else null
+    }
+
+    private fun oauthSealState(slug: String, verifier: String?, origin: String?): String {
         val payload = buildJsonObject {
             put("s", slug)
             if (verifier != null) put("v", verifier)
+            if (origin != null) put("o", origin)
             put("t", System.currentTimeMillis())
         }.toString().toByteArray(StandardCharsets.UTF_8)
         val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
@@ -2014,7 +2027,7 @@ class NyoraRestServer(
             val t = obj["t"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: return null
             if (System.currentTimeMillis() - t > maxAgeMs) return null
             val slug = obj["s"]?.jsonPrimitive?.contentOrNull ?: return null
-            SealedState(slug, obj["v"]?.jsonPrimitive?.contentOrNull)
+            SealedState(slug, obj["v"]?.jsonPrimitive?.contentOrNull, obj["o"]?.jsonPrimitive?.contentOrNull)
         } catch (_: Exception) {
             null
         }
@@ -2037,9 +2050,11 @@ class NyoraRestServer(
             sb.append("&code_challenge=").append(urlEncode(challenge))
             sb.append("&code_challenge_method=").append(cfg.pkce)
         }
-        // Stateless: seal slug + verifier + issue-time into `state` (no server-side
-        // store), so the callback can land on any cluster node and still complete.
-        val state = oauthSealState(slug, verifier)
+        // Stateless: seal slug + verifier + issue-time (+ the web caller's origin for
+        // the COOP-safe relay) into `state` — no server-side store, so the callback
+        // can land on any cluster node and still complete.
+        val returnOrigin = exchange.query()["ro"]?.let { oauthAllowedOrigin(it) }
+        val state = oauthSealState(slug, verifier, returnOrigin)
         sb.append("&state=").append(urlEncode(state))
         if (cfg.scope != null) sb.append("&scope=").append(cfg.scope)
         applyCors(exchange)
@@ -2060,13 +2075,14 @@ class NyoraRestServer(
         val err = params["error"]
         val code = params["code"]
         val state = params["state"]
+        val sealed = oauthOpenState(state)
+        val origin = sealed?.origin
         if (cfg == null || err != null || code.isNullOrBlank() || state.isNullOrBlank()) {
-            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, err ?: "no_code"))
+            respondOauthResult(exchange, origin, slug, null, err ?: "no_code")
             return
         }
-        val sealed = oauthOpenState(state)
         if (sealed == null || sealed.slug != slug) {
-            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_state"))
+            respondOauthResult(exchange, origin, slug, null, "bad_state")
             return
         }
         val raw = try {
@@ -2093,16 +2109,22 @@ class NyoraRestServer(
                 userAgent = cfg.userAgent,
             ) ?: error("token request failed")
         } catch (_: Exception) {
-            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "exchange_failed"))
+            respondOauthResult(exchange, origin, slug, null, "exchange_failed")
             return
         }
         val obj = try {
             json.parseToJsonElement(raw).jsonObject
         } catch (_: Exception) {
-            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_token_response"))
+            respondOauthResult(exchange, origin, slug, null, "bad_token_response")
             return
         }
-        respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, obj, null))
+        if (obj["access_token"]?.jsonPrimitive?.contentOrNull == null) {
+            // Surface the provider's own error instead of a silent "no token".
+            respondOauthResult(exchange, origin, slug, null,
+                obj["error"]?.jsonPrimitive?.contentOrNull ?: "no_access_token")
+            return
+        }
+        respondOauthResult(exchange, origin, slug, obj, null)
     }
 
     private fun handleKitsuLogin(exchange: HttpExchange) {
@@ -2170,6 +2192,31 @@ class NyoraRestServer(
   setTimeout(function(){ try{ window.close(); }catch(e){} }, 400);
 })();
 </script></body></html>"""
+    }
+
+    // COOP-safe result delivery for the web bridge. If the caller passed a validated
+    // origin, redirect the popup to <origin>/oauth.html#… — a same-origin page there
+    // relays the outcome to the opener via BroadcastChannel, which works even when a
+    // provider's Cross-Origin-Opener-Policy has nulled window.opener. Without an
+    // origin (native / legacy callers) fall back to the direct postMessage page.
+    private fun respondOauthResult(
+        exchange: HttpExchange, origin: String?, slug: String, token: JsonObject?, error: String?,
+    ) {
+        if (origin == null) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, exchange.query()["state"], token, error))
+            return
+        }
+        val frag = StringBuilder("slug=").append(urlEncode(slug))
+        token?.get("access_token")?.jsonPrimitive?.contentOrNull
+            ?.let { frag.append("&access_token=").append(urlEncode(it)) }
+        token?.get("refresh_token")?.jsonPrimitive?.contentOrNull
+            ?.let { frag.append("&refresh_token=").append(urlEncode(it)) }
+        if (error != null) frag.append("&error=").append(urlEncode(error))
+        // location.replace (not a Location header) so the token never lands in an
+        // intermediary's access log; oauth.html scrubs it from history on arrival.
+        val target = "$origin/oauth.html#$frag"
+        respondHtml(exchange, 200,
+            "<!doctype html><html><body>Connecting…<script>location.replace(${oauthJsStr(target)})</script></body></html>")
     }
 
     private fun oauthJsStr(s: String): String =
