@@ -45,7 +45,7 @@ api.nyora.xyz {
     header @allowed_origin {
         Access-Control-Allow-Origin "{http.request.header.Origin}"
         Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS"
-        Access-Control-Allow-Headers "Content-Type"
+        Access-Control-Allow-Headers "Content-Type, Authorization"
         Vary Origin
         defer
     }
