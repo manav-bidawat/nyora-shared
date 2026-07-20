@@ -1,0 +1,44 @@
+name: Notify nyora-aidoku
+
+# nyora-aidoku builds on-device Aidoku extensions from the same kotatsu-parsers
+# catalog this repo pins (build.gradle.kts: kotatsu-parsers-redo:<commit>). When
+# that pin moves — i.e. the upstream source set changed — tell nyora-aidoku to
+# regenerate and repackage so the installable extensions don't drift from what
+# the app parses.
+#
+# Requires repo secret AIDOKU_DISPATCH_PAT: a fine-grained PAT with
+# "Contents: read & write" (or classic `repo`) scope on Nyora-Manga/nyora-aidoku.
+# The built-in GITHUB_TOKEN cannot dispatch across repositories.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - build.gradle.kts
+  workflow_dispatch:
+
+concurrency:
+  group: notify-aidoku
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pull the pinned parser commit purely for a human-readable commit message
+      # on the nyora-aidoku side; the rebuild doesn't depend on its value.
+      - name: Read pinned kotatsu-parsers commit
+        id: pin
+        run: |
+          pin=$(grep -oE 'kotatsu-parsers-redo:[0-9a-f]+' build.gradle.kts | head -1 | cut -d: -f2)
+          echo "commit=${pin:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch rebuild to nyora-aidoku
+        env:
+          GH_TOKEN: ${{ secrets.AIDOKU_DISPATCH_PAT }}
+        run: |
+          gh api repos/Nyora-Manga/nyora-aidoku/dispatches \
+            -f event_type=rebuild-sources \
+            -f 'client_payload[reason]=nyora-shared parser pin ${{ steps.pin.outputs.commit }}'
