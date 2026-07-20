@@ -8,6 +8,9 @@ import com.nyora.hasan72341.shared.download.DownloadSettings
 import com.nyora.hasan72341.shared.net.HelperNetworkConfig
 import com.nyora.hasan72341.shared.net.HelperNetworkSettings
 import com.nyora.hasan72341.shared.net.SsrfGuard
+import com.nyora.hasan72341.shared.net.buildOkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.nyora.hasan72341.shared.model.Library
 import com.nyora.hasan72341.shared.model.Manga
 import com.nyora.hasan72341.shared.model.MangaChapter
@@ -1777,6 +1780,11 @@ class NyoraRestServer(
 
     private val scrobblerHttp by lazy { okhttp3.OkHttpClient() }
 
+    // Cloudflare-aware client (CloudflareInterceptor → FlareSolverr + cf_clearance
+    // replay, shared cookie jar) for tracker endpoints behind a CF challenge —
+    // notably Kitsu's OAuth token endpoint, which a bare datacenter POST can't pass.
+    private val cfHttp by lazy { buildOkHttpClient(networkConfig.snapshot()) }
+
     /// The `<slug>` in `/tracker/<slug>/{search,scrobble}`.
     private fun trackerSlug(exchange: HttpExchange): String? =
         exchange.requestURI.path.split('/').getOrNull(2)?.takeIf { it.isNotBlank() }
@@ -2144,15 +2152,20 @@ class NyoraRestServer(
         val form = "grant_type=password&username=${urlEncode(username)}&password=${urlEncode(password)}" +
             "&client_id=dd031b32d2f56c990b1425efe6c42ad847e7fe3ab46bf1299f05ecd856bdb7dd" +
             "&client_secret=54d7307928f63414defd96399fc31ba847961ceaecef3a5fd93144e960c0e151"
-        val resp = serviceRequest(
-            url = "https://kitsu.app/api/oauth/token",
-            method = "POST",
-            bearer = null,
-            body = form.toByteArray(StandardCharsets.UTF_8),
-            contentType = "application/x-www-form-urlencoded",
-            accept = "application/json",
-            userAgent = null,
-        ) ?: return respondError(exchange, 502, "kitsu login failed")
+        // Kitsu's OAuth token endpoint sits behind a Cloudflare "Just a moment"
+        // challenge (403 cf-mitigated) that a datacenter POST can't clear, so go
+        // through cfHttp (FlareSolverr solves it, then the POST is replayed with the
+        // cf_clearance cookie). The public /api/edge/* endpoints aren't challenged.
+        val resp = try {
+            val req = okhttp3.Request.Builder()
+                .url("https://kitsu.app/api/oauth/token")
+                .header("Accept", "application/json")
+                .post(form.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+                .build()
+            cfHttp.newCall(req).execute().use { it.body?.string() }
+        } catch (_: Exception) {
+            null
+        } ?: return respondError(exchange, 502, "kitsu login failed")
         respondJsonRaw(exchange, 200, resp)
     }
 
