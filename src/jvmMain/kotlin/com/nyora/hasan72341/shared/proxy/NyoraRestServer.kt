@@ -1852,7 +1852,13 @@ class NyoraRestServer(
                 scrobbler.updateProgress(mediaId, chapter = progress, status = status, rating = rating, comment = null)
             }
         } catch (e: Exception) {
-            return respondError(exchange, 502, "Tracker update failed: ${e.message}")
+            // 200 (not 5xx) with an ok:false body so the reason survives Cloudflare
+            // (which masks origin 5xx) and the web can show WHY the write was rejected.
+            respondJson(exchange, 200, buildJsonObject {
+                put("ok", false)
+                put("error", e.message ?: "update failed")
+            })
+            return
         }
         val out = buildJsonObject {
             put("ok", true)
