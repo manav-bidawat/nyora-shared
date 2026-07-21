@@ -170,6 +170,11 @@ nyora.xyz {
         -Server
     }
     encode gzip
+    # Cache-Control so Cloudflare (with a "Cache Everything" rule) + browsers cache
+    # the static marketing site: hashed assets forever, HTML 10m browser / 1h edge.
+    @immutable path /_astro/* /fonts/*
+    header @immutable Cache-Control "public, max-age=31536000, immutable"
+    header ?Cache-Control "public, max-age=600, s-maxage=3600"
     root * /var/www/nyora-marketing
     try_files {path} {path}/ {path}.html /index.html
     file_server
