@@ -1,4 +1,12 @@
 stream.hasanraza.tech, sync.nyora.xyz {
+log {
+	output file /var/log/caddy/access.log {
+		roll_size 200MiB
+		roll_keep 12
+		roll_keep_for 720h
+	}
+	format json
+}
     encode gzip
 
     # Hide the upstream (uvicorn) banner and enforce HTTPS + no MIME sniffing.
@@ -29,6 +37,14 @@ stream.hasanraza.tech, sync.nyora.xyz {
 
 
 (nyora_api_handlers) {
+log {
+	output file /var/log/caddy/access.log {
+		roll_size 200MiB
+		roll_keep 12
+		roll_keep_for 720h
+	}
+	format json
+}
 
     # Enforce HTTPS + hide any upstream server banner across the whole API vhost.
     header {
@@ -161,6 +177,14 @@ hasanraza.tech {
 
 # Nyora marketing site (Astro static) — served from VM
 nyora.xyz {
+log {
+	output file /var/log/caddy/access.log {
+		roll_size 200MiB
+		roll_keep 12
+		roll_keep_for 720h
+	}
+	format json
+}
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
@@ -182,6 +206,14 @@ nyora.xyz {
 
 # Nyora web app (SPA) — served from VM
 web.nyora.xyz {
+log {
+	output file /var/log/caddy/access.log {
+		roll_size 200MiB
+		roll_keep 12
+		roll_keep_for 720h
+	}
+	format json
+}
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
