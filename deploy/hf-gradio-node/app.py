@@ -13,6 +13,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 
 import gradio as gr
 import httpx
@@ -70,12 +72,35 @@ _LOCAL = re.compile(r"^/(library|downloads|supabase|ota|local)(/.*)?$")
 _DROP = {"content-encoding", "content-length", "transfer-encoding", "connection", "host"}
 
 # Launch the JVM helper on loopback. Small heap keeps it inside the free tier's RAM.
-_helper = subprocess.Popen(
-    ["java", "-Xmx512m", "-Xss512k", "-XX:MaxMetaspaceSize=96m",
-     "-XX:ReservedCodeCacheSize=48m", "-XX:+UseSerialGC", "-jar", JAR],
-    env={**os.environ, "NYORA_HELPER_PORT": str(HELPER_PORT)},
-)
+_JAVA_CMD = ["java", "-Xmx512m", "-Xss512k", "-XX:MaxMetaspaceSize=96m",
+             "-XX:ReservedCodeCacheSize=48m", "-XX:+UseSerialGC", "-jar", JAR]
+_JAVA_ENV = {**os.environ, "NYORA_HELPER_PORT": str(HELPER_PORT)}
+
+
+def _spawn_helper():
+    return subprocess.Popen(_JAVA_CMD, env=_JAVA_ENV)
+
+
+_helper = _spawn_helper()
 atexit.register(lambda: _helper.terminate())
+
+
+def _watchdog():
+    # Self-heal: if the JVM helper dies (crash/OOM), respawn it so the node keeps
+    # serving locally instead of relaying every request to the WARP cluster.
+    global _helper
+    while True:
+        time.sleep(15)
+        if _helper.poll() is not None:
+            code = _helper.returncode
+            print(f"[nyora-node] helper exited (code {code}); respawning", flush=True)
+            try:
+                _helper = _spawn_helper()
+            except Exception as e:  # noqa: BLE001 - keep the watchdog alive
+                print(f"[nyora-node] respawn failed: {e}", flush=True)
+
+
+threading.Thread(target=_watchdog, daemon=True, name="helper-watchdog").start()
 
 _client = httpx.AsyncClient(base_url=HELPER, timeout=httpx.Timeout(90.0))
 
