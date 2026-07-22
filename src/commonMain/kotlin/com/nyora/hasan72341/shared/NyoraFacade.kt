@@ -102,16 +102,16 @@ class NyoraFacade(
     fun markUpdatesSeen(mangaId: String) = repository.markUpdatesSeen(mangaId)
     fun markAllUpdatesSeen() = repository.markAllUpdatesSeen()
 
-    // ── Supabase Sync ──────────────────────────────────────────────────────
+    // ── Nyora Sync Sync ──────────────────────────────────────────────────────
 
-    fun supabaseSignIn(email: String, password: String): String? = repository.supabaseSignIn(email, password)
-    fun supabaseRegister(email: String, password: String): String? = repository.supabaseRegister(email, password)
+    fun nyoraSyncSignIn(email: String, password: String): String? = repository.nyoraSyncSignIn(email, password)
+    fun nyoraSyncRegister(email: String, password: String): String? = repository.nyoraSyncRegister(email, password)
 
-    fun supabaseSyncNow() = repository.supabaseSyncNow()
+    fun nyoraSyncNow() = repository.nyoraSyncNow()
 
-    fun supabaseRestoreFromCloud() = repository.supabaseRestoreFromCloud()
+    fun nyoraSyncRestoreFromCloud() = repository.nyoraSyncRestoreFromCloud()
 
     fun hasLocalSyncableData(): Boolean = repository.hasLocalSyncableData()
 
-    fun supabaseSignOut() = repository.supabaseSignOut()
+    fun nyoraSyncSignOut() = repository.nyoraSyncSignOut()
 }

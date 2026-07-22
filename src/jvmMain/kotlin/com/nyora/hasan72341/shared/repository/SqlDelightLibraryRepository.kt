@@ -56,12 +56,12 @@ class SqlDelightLibraryRepository(
         dedupeCategories()
     }
 
-    // Supabase sync — set by the app after SupabaseConfig is loaded and the user has signed in.
+    // Nyora Sync sync — set by the app after NyoraSyncConfig is loaded and the user has signed in.
     // Fire-and-forget: called on a daemon thread after each mutating operation.
-    var supabaseSync: com.nyora.hasan72341.shared.sync.SupabaseSync? = null
+    var nyoraSync: com.nyora.hasan72341.shared.sync.NyoraSync? = null
 
     private fun triggerPush() {
-        val sync = supabaseSync ?: return
+        val sync = nyoraSync ?: return
         Thread(sync::pushAll).also { it.isDaemon = true }.start()
     }
     private val json = Json {
@@ -143,6 +143,79 @@ class SqlDelightLibraryRepository(
             runCatching { driver.execute(null, alterSql, 0) }
                 .onFailure { System.err.println("ALTER failed for $table.$column: ${it.message}") }
         }
+    }
+
+    /**
+     * One-time migration: rewrite legacy manga ids to the cross-platform `nyoraId` scheme — a
+     * hash of `sourceName + url`, byte-identical to nyora-web (seed 1125899906842597, rolling
+     * `31*h + charCode`, 64-bit signed). Older builds keyed details-opened manga by
+     * `url.hashCode()`, which never matched the web or new browse ids. We recompute each PARSER
+     * manga's id and remap it across the `manga` row AND every FK table (favourites, history,
+     * bookmarks, prefs, categories, updates) so a returning user's library survives and merges
+     * with the web on the next sync. Idempotent (recompute == same id → skipped); a browse-row +
+     * details-row collision for the same manga collapses via `UPDATE OR IGNORE` + delete.
+     */
+    fun migrateMangaIdsToNyoraId() {
+        val mapping = LinkedHashMap<String, String>() // oldId -> newId
+        runCatching {
+            val rows = driver.executeQuery(
+                identifier = null,
+                sql = "SELECT id, url, source_ref FROM manga",
+                mapper = { cursor ->
+                    app.cash.sqldelight.db.QueryResult.Value(
+                        buildList {
+                            while (cursor.next().value) {
+                                val id = cursor.getString(0) ?: continue
+                                add(Triple(id, cursor.getString(1) ?: "", cursor.getString(2) ?: "{}"))
+                            }
+                        },
+                    )
+                },
+                parameters = 0,
+            ).value
+            for ((id, url, ref) in rows) {
+                val decoded = MangaSourceRefCodec.decode(ref)
+                if (decoded is MangaSourceRef.Parser) {
+                    val newId = nyoraMangaId(decoded.name, url).toString()
+                    if (newId != id) mapping[id] = newId
+                }
+            }
+        }.onFailure { System.err.println("[migrate manga_id] scan failed: ${it.message}"); return }
+
+        if (mapping.isEmpty()) return
+        // FK cascades would delete the child rows out from under us; disable while remapping.
+        runCatching { driver.execute(null, "PRAGMA foreign_keys = OFF", 0) }
+        val fkTables = listOf(
+            "manga_favourite", "manga_history", "bookmark",
+            "manga_prefs", "manga_favourite_category", "manga_update",
+        )
+        for ((oldId, newId) in mapping) {
+            for (t in fkTables) {
+                runCatching {
+                    driver.execute(null, "UPDATE OR IGNORE $t SET manga_id = ? WHERE manga_id = ?", 2) {
+                        bindString(0, newId); bindString(1, oldId)
+                    }
+                }
+                // Remove any leftover old-id row the UPDATE skipped on a collision.
+                runCatching { driver.execute(null, "DELETE FROM $t WHERE manga_id = ?", 1) { bindString(0, oldId) } }
+            }
+            runCatching {
+                driver.execute(null, "UPDATE OR IGNORE manga SET id = ? WHERE id = ?", 2) {
+                    bindString(0, newId); bindString(1, oldId)
+                }
+            }
+            runCatching { driver.execute(null, "DELETE FROM manga WHERE id = ?", 1) { bindString(0, oldId) } }
+        }
+        runCatching { driver.execute(null, "PRAGMA foreign_keys = ON", 0) }
+        System.err.println("[migrate manga_id] remapped ${mapping.size} manga id(s) to nyoraId")
+    }
+
+    /** Cross-platform stable manga id — see [KotatsuParserExtensionService] / nyora-web `nyoraId`. */
+    private fun nyoraMangaId(sourceName: String, url: String): Long {
+        var h = 1125899906842597L
+        val s = sourceName + url
+        for (c in s) h = 31 * h + c.code
+        return h
     }
 
     /**
@@ -286,7 +359,7 @@ class SqlDelightLibraryRepository(
             scroll = scroll,
             percent = percent.toDouble(),
             chapters_count = chaptersCount.toLong(),
-            updated_at = parseSupabaseTimestampMillis(updatedAt),
+            updated_at = parseNyoraSyncTimestampMillis(updatedAt),
         )
     }
 
@@ -686,32 +759,32 @@ class SqlDelightLibraryRepository(
         }
     }
 
-    override fun supabaseSignIn(email: String, password: String): String? {
-        val sync = supabaseSync ?: return "Sync unavailable"
+    override fun nyoraSyncSignIn(email: String, password: String): String? {
+        val sync = nyoraSync ?: return "Sync unavailable"
         return sync.signIn(email, password).fold(
             onSuccess = { null },
             onFailure = { it.message ?: "Sign-in failed" },
         )
     }
 
-    override fun supabaseRegister(email: String, password: String): String? {
-        val sync = supabaseSync ?: return "Sync unavailable"
+    override fun nyoraSyncRegister(email: String, password: String): String? {
+        val sync = nyoraSync ?: return "Sync unavailable"
         return sync.register(email, password).fold(
             onSuccess = { null },
             onFailure = { it.message ?: "Registration failed" },
         )
     }
 
-    override fun supabaseSyncNow() {
-        supabaseSync?.syncNow()
+    override fun nyoraSyncNow() {
+        nyoraSync?.syncNow()
     }
 
-    override fun supabaseRestoreFromCloud() {
-        supabaseSync?.restoreFromCloud()
+    override fun nyoraSyncRestoreFromCloud() {
+        nyoraSync?.restoreFromCloud()
     }
 
-    override fun supabaseSignOut() {
-        supabaseSync?.signOut()
+    override fun nyoraSyncSignOut() {
+        nyoraSync?.signOut()
     }
 
     fun allFavouritesIncludingDeleted(): List<com.nyora.hasan72341.shared.db.Manga_favourite> {
@@ -817,7 +890,7 @@ class SqlDelightLibraryRepository(
         )
     }
 
-    private fun parseSupabaseTimestampMillis(value: String?): Long {
+    private fun parseNyoraSyncTimestampMillis(value: String?): Long {
         if (value.isNullOrBlank()) return System.currentTimeMillis()
         return runCatching { Instant.parse(value).toEpochMilli() }
             .recoverCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }

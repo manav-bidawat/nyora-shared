@@ -31,8 +31,15 @@ import java.util.concurrent.TimeUnit
 internal object FlareSolverr {
     private val endpoint: String = System.getenv("FLARESOLVERR_URL") ?: "http://127.0.0.1:8191/v1"
 
-    /** Absent env → enabled; set NYORA_FLARESOLVERR_DISABLED=1 to turn off. */
-    private val enabled: Boolean = System.getenv("NYORA_FLARESOLVERR_DISABLED").isNullOrBlank()
+    /**
+     * FlareSolverr spawns headless Chrome. It is used ONLY by the headless cluster; every client
+     * with a native WebKit solver (macOS `WKWebView`, iOS) must never touch it — WebKit fully
+     * replaces Chromium there. So it's off whenever `NYORA_NATIVE_CF_SOLVER` is set (the macOS app
+     * always sets it), not just when `NYORA_FLARESOLVERR_DISABLED=1`. This makes "no Chromium on
+     * Mac" structural rather than dependent on a single env flag being present.
+     */
+    private val enabled: Boolean = System.getenv("NYORA_FLARESOLVERR_DISABLED").isNullOrBlank() &&
+        System.getenv("NYORA_NATIVE_CF_SOLVER").isNullOrBlank()
 
     // Each solve spawns a headless Chrome. A batched all-source search hits many
     // CF sources at once, so cap concurrent solves (default 2) to stop a Chrome
@@ -100,6 +107,28 @@ internal object FlareSolverr {
 object CloudflareInterceptor : Interceptor {
     private val solvedUserAgent = ConcurrentHashMap<String, String>()
 
+    /**
+     * Register the User-Agent that solved a host's challenge via the app's native WebView.
+     * cf_clearance is bound to the UA that obtained it, so once the app POSTs the clearance
+     * cookie we must pin every subsequent request to that host to the SAME UA — otherwise
+     * the parser sends its own UA, Cloudflare rejects the clearance, and the retry is
+     * challenged again. Mirrors what the FlareSolverr path does with solution.userAgent.
+     * Also clears any blocked-until backoff so the retry is attempted immediately.
+     */
+    fun noteNativeSolve(host: String, userAgent: String) {
+        solvedUserAgent[host] = userAgent
+        blockedUntil.remove(host)
+    }
+
+    // Temporary diagnostic — appends to the same file the macOS app logs the solve to,
+    // so the engine's retry request (UA, cookies actually loaded, response) can be seen
+    // alongside the app-side solve. Remove once CF native-solve is confirmed working.
+    private fun cfDiag(message: String) {
+        runCatching {
+            java.io.File("/tmp/nyora-cf.log").appendText("[cf] $message\n")
+        }
+    }
+
     // When the host app can solve challenges itself, signal the challenge to it rather
     // than spawning a headless Chrome. The macOS app sets this: it owns a WKWebView,
     // which is already part of the OS, runs on the user's own residential IP, and can
@@ -134,6 +163,14 @@ object CloudflareInterceptor : Interceptor {
         var request = chain.request()
         val host = request.url.host
 
+        // Once a host has been CF-solved by the app's WebView, its cf_clearance only works
+        // from that WebView session (verified: OkHttp/curl-impersonate can't replay it).
+        // Route the request through the WebView relay instead of this JVM's TLS stack.
+        if (WebViewRelay.isConfigured && WebViewRelay.isRelayHost(host)) {
+            WebViewRelay.fetch(request)?.let { return it }
+            // Relay failed — fall through to a normal attempt rather than hard-erroring.
+        }
+
         // If we've already solved this host, keep sending the solver's UA so the
         // stored cf_clearance cookie is accepted.
         solvedUserAgent[host]?.let { userAgent ->
@@ -141,6 +178,17 @@ object CloudflareInterceptor : Interceptor {
         }
 
         val response = chain.proceed(request)
+        if (solvedUserAgent.containsKey(host)) {
+            val jarCookies = try {
+                sharedCookieJar.loadForRequest(request.url).joinToString(",") { it.name }
+            } catch (_: Throwable) { "?" }
+            cfDiag(
+                "engine retry host=$host code=${response.code} " +
+                    "cf-mitigated=${response.header("cf-mitigated")} " +
+                    "ua=${request.header("User-Agent")?.takeLast(24)} " +
+                    "jarCookies=[$jarCookies]"
+            )
+        }
         // Escalate on ANY 403/503 — either a JS challenge (has CF markers) OR a hard
         // datacenter-IP block (e.g. MangaFire on claw returns a bare 403 with no
         // challenge markers). Both mean "this server IP can't get through" → the fix
@@ -160,14 +208,18 @@ object CloudflareInterceptor : Interceptor {
         val protection = cfProtection(response)
         val challenge = protection == CfProtection.CHALLENGE
 
-        // 1) Native solve: hand a SOLVABLE challenge to the host app's own WebView (macOS
-        //    WKWebView). It solves on the user's real IP — passively first, and
-        //    interactively if Turnstile wants a click — then POSTs the cf_clearance to
-        //    /cloudflare/clearance and retries. The app's WebView UA is byte-identical to
-        //    NYORA_BROWSER_UA (see HelperNetworkSettings), so the clearance it returns is
-        //    valid for our own requests without any UA juggling. A hard block skips this and
-        //    falls through to a different egress (residential/device) below.
-        if (challenge && nativeSolver) {
+        // 1) Native solve: hand the challenge to the host app's own WebView (macOS WKWebView).
+        //    It solves on the user's real IP — passively first, and interactively if Turnstile
+        //    wants a click — then POSTs the cf_clearance to /cloudflare/clearance and retries.
+        //
+        //    With a native WebView we escalate BOTH a solvable CHALLENGE *and* a hard
+        //    "you have been blocked" page, matching nyora-android (its WebView always tries).
+        //    A JVM OkHttp request is frequently refused where a real Safari WebView on the same
+        //    residential IP loads fine — the block keys off this process's TLS fingerprint /
+        //    reputation, not the user. If the WebView is genuinely blocked too, the user closes
+        //    it and we fall through / back off. (FlareSolverr + proxy paths below keep the
+        //    stricter CHALLENGE-only gate: a headless solve can't beat a hard block.)
+        if (nativeSolver && (protection == CfProtection.CHALLENGE || protection == CfProtection.BLOCKED)) {
             response.close()
             throw IOException("Cloudflare challenge: $host")
         }

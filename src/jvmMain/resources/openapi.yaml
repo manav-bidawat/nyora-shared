@@ -14,7 +14,7 @@ info:
     (the Sync API), documented at the host's `/docs` for `stream.hasanraza.tech`.
 
     > This same server also exposes a broader **local-only** management surface
-    > (`/library/*`, `/downloads/*`, `/library/categories/*`, `/supabase/*`,
+    > (`/library/*`, `/downloads/*`, `/library/categories/*`, `/nyorasync/*`,
     > `/ota/*`) used by the desktop app's in-process helper. Those act on local
     > device state and are intentionally **omitted** here.
 

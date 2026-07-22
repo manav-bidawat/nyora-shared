@@ -8,7 +8,7 @@ import java.util.Properties
  * A disk-backed [ScrobblerTokenStore] so desktop tracker logins survive an app
  * restart (TS-011). All services share one `scrobbler_tokens.properties` file
  * in the Nyora data dir, keyed `<service.slug>.access_token` /
- * `<service.slug>.refresh_token`, mirroring how [com.nyora.hasan72341.shared.sync.SupabaseConfig]
+ * `<service.slug>.refresh_token`, mirroring how [com.nyora.hasan72341.shared.sync.NyoraSyncConfig]
  * persists its own tokens.
  *
  * Reads and writes load-modify-store the shared file under a process-wide lock

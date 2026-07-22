@@ -92,6 +92,14 @@ internal object ResponseCache {
         scheduleSave()
     }
 
+    /** Drop every entry whose key starts with [prefix] (e.g. "browse:") — used to force a
+     *  fresh fetch after a Cloudflare solve, so content cached empty/blocked pre-solve is
+     *  replaced instead of served stale. */
+    fun invalidatePrefix(prefix: String) {
+        val removed = map.keys.removeIf { it.startsWith(prefix) }
+        if (removed) scheduleSave()
+    }
+
     /** Debounced async snapshot — disk write never blocks a request. */
     private fun scheduleSave() {
         val now = System.currentTimeMillis()

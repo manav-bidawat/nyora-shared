@@ -7,6 +7,9 @@ import com.nyora.hasan72341.shared.model.MangaPage
 interface MangaExtensionService {
     val supportsLatest: Boolean
 
+    /** The source's live domain (host). Used to open the manual Cloudflare solver for it. */
+    val domain: String get() = ""
+
     fun getHeaders(): Map<String, String> = emptyMap()
 
     suspend fun getPopular(page: Int): MangaSearchPage

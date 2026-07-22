@@ -35,6 +35,8 @@ class KotatsuParserExtensionService(
     // family's Site-Id/Authorization) is applied to the client it uses.
     private val parser = context.newParserInstance(parserSource).also { context.bindParser(it) }
 
+    override val domain: String get() = parser.domain
+
     override val supportsLatest: Boolean
         get() = SortOrder.UPDATED in parser.availableSortOrders
 
@@ -104,8 +106,25 @@ class KotatsuParserExtensionService(
     private fun toPage(list: List<LibManga>): MangaSearchPage =
         MangaSearchPage(entries = list.map { it.toNyora() }, hasNextPage = list.isNotEmpty())
 
+    /**
+     * Cross-platform stable manga id — byte-identical to nyora-web's `nyoraId(sourceName, url)`
+     * and to kotatsu's own `generateUid`: seed 1125899906842597, rolling `31*h + charCode` over
+     * (`source.name` + `url`), 64-bit signed wraparound, decimal string. This value becomes the
+     * `manga_id` sync foreign key on favourites/history/bookmarks, so it MUST match the web
+     * exactly (which recomputes it uniformly for browse AND details) or a user's library won't
+     * merge across web ↔ desktop. We recompute it here rather than trusting `LibManga.id`,
+     * because the details path seeds `id = url.hashCode()` (a different, non-matching hash) and
+     * some parsers pass a non-url string to `generateUid`.
+     */
+    private fun nyoraId(mangaUrl: String): Long {
+        var h = 1125899906842597L
+        val s = parserSource.name + mangaUrl
+        for (c in s) h = 31 * h + c.code
+        return h
+    }
+
     private fun LibManga.toNyora(): Manga = Manga(
-        id = id.toString(),
+        id = nyoraId(url).toString(),
         title = title,
         altTitles = altTitles.toList(),
         url = url,
