@@ -1,50 +1,41 @@
 package com.nyora.hasan72341.shared
 
-/// Runtime patches over the pinned `nyora-parsers-redo` dependency, whose source domains are
-/// baked into the compiled JAR and cannot be edited in-tree. Mirrors the iOS port's in-tree fixes.
-///
-/// - [DOMAIN_OVERRIDES]: rebranded/relocated sources whose default domain is dead; the value is the
-///   current live domain (curl-verified, or live-behind-Cloudflare). Applied via ConfigKey.Domain.
-/// - [DEAD_SOURCES]: sources whose domain is dead with no working same-CMS successor; skipped when
-///   seeding the built-in source catalogue so they don't appear to users.
-/// Keyed by the upstream `MangaParserSource.name`.
+// AUTO-GENERATED — DO NOT EDIT.
+// Single source of truth: nyora-data-driven/patches.json
+// Regenerate: python3 tools/generate-overlays.py (in nyora-data-driven).
+//
+// DOMAIN_OVERRIDES: relocated/rebranded sources -> current live domain (ConfigKey.Domain).
+// TITLE_OVERRIDES:  display renames that came with a domain move.
+// DEAD_SOURCES:     domain dead with no working successor; hidden from the catalogue.
+// Keyed by the upstream MangaParserSource.name.
 object SourcePatches {
     val DOMAIN_OVERRIDES: Map<String, String> = mapOf(
+        "AINZSCANS" to "ainzscans.net",
         "ALTAYSCANS" to "witchscans.com",
         "ASTRASCANS" to "astracomic.com",
-        "FLOWERMANGA" to "flowermangas.net",
-        "MANGAGEZGINI" to "mangagezgini.online",
-        "MANHUAUSS" to "manhua.us.com",
-        "MHSCANS" to "mhscans.com",
-        "ISEKAISCAN_EU" to "isekaiscan.top",
-        "RUYAMANGA" to "ruyamanga2.com",
-        "TRUYENTRANHFULL" to "truyentranhfull.vip",
-        "MANGATILKISI" to "tilkiscans.com",
-        "YAOIBAR" to "yaoibar.lol",
-        "AINZSCANS" to "ainzscans.net",
         "DOCTRUYEN3Q" to "doctruyen3qhub.org",
-        "YUGEN_MANGAS_ES" to "visualikigai.com",
+        "FLOWERMANGA" to "flowermangas.net",
+        "ISEKAISCAN_EU" to "isekaiscan.top",
         "LEITORDEMANGA" to "leitordemangas.com",
         "LILYUMFANSUB" to "lilyumfansub.pro",
-        // NOTE (2026-07 health-probe triage): HIPERDEX/TOONILY_ME/POJOKMANGA/MANHWAX/MANHWADESU/
-        // MANHWALAND_INK/NEATMANGA all "moved" but rebuilt on a NEW site structure — a pure domain
-        // override 404s on the parser's expected paths / still returns empty. They need a parser
-        // (selector/API) rewrite, not a domain swap, so they are deliberately NOT listed here.
+        "MANGAGEZGINI" to "mangagezgini.online",
+        "MANGATILKISI" to "tilkiscans.com",
+        "MANHUAUSS" to "manhua.us.com",
+        "MHSCANS" to "mhscans.com",
+        "RUYAMANGA" to "ruyamanga2.com",
+        "TRUYENTRANHFULL" to "truyentranhfull.vip",
+        "YAOIBAR" to "yaoibar.lol",
+        "YUGEN_MANGAS_ES" to "visualikigai.com",
     )
 
-    /// Display-name overrides for sources that rebranded along with their domain move.
     val TITLE_OVERRIDES: Map<String, String> = mapOf(
         "ASTRASCANS" to "Astra Comic",
-        "MANGATILKISI" to "Tilki Scans",
         "ISEKAISCAN_EU" to "IsekaiScan",
+        "MANGATILKISI" to "Tilki Scans",
+        "TOONILY_ME" to "ToonDex",
         "YUGEN_MANGAS_ES" to "Visual Ikigai",
-        "TOONILY_ME" to "ToonDex", // rebranded toonily.me → toondex.io (native ToonDexExtensionService)
     )
 
-    // Sources whose baked-in domain is dead (DNS-unresolvable / connection-refused /
-    // parked / suspended) with no working same-CMS successor — hidden from the catalogue.
-    // Curated + health-probed 2026-07-15 (Cloudflare-protected sources are intentionally KEPT).
-    // Keyed by the upstream `MangaParserSource.name`.
     val DEAD_SOURCES: Set<String> = setOf(
         "ADONISFANSUB",
         "AIYUMANGASCANLATION",
@@ -130,15 +121,12 @@ object SourcePatches {
         "LECTORUNM",
         "LEGENDSCANLATIONS",
         "LERMANGAONLINE",
-        "LILYUMFANSUB",
         "LIMBOSCAN",
         "LMTOS",
         "LUGNICASCANS",
         "LUNARSCANS",
         "LUXMANGA",
         "MAFIAMANGA",
-        "MANGA_MANHUA",
-        "MANGA_SCAN",
         "MANGA1K",
         "MANGA4LIFE",
         "MANGAAY",
@@ -162,8 +150,8 @@ object SourcePatches {
         "MANGAOKUTR",
         "MANGAONELOVE",
         "MANGAONLINETEAM",
-        "MANGAOWL_ONE",
         "MANGAOWLBLOG",
+        "MANGAOWL_ONE",
         "MANGAREADCO",
         "MANGAROSE",
         "MANGARUBY",
@@ -177,6 +165,8 @@ object SourcePatches {
         "MANGATR",
         "MANGATX_GG",
         "MANGAYARO",
+        "MANGA_MANHUA",
+        "MANGA_SCAN",
         "MANHUAES",
         "MANHUAGA",
         "MANHUAGOLD",
@@ -254,7 +244,6 @@ object SourcePatches {
         "TERRITORIOLEAL",
         "TIMENAIGHT",
         "TMOMANGA",
-        "TOONILY_ME",
         "TRADUCCIONESAMISTOSAS",
         "TRUYENHENTAI18",
         "TUMANGAONLINE",
@@ -284,10 +273,10 @@ object SourcePatches {
         "ZANDYNOFANSUB",
         "ZENITHSCANS",
         "ZEVEP",
-        "ZIN_MANGA_COM",
         "ZINCHANMANGA_NET",
         "ZINMANGA_CC",
         "ZINMANGA_MS",
+        "ZIN_MANGA_COM",
         "ZSCANLATION",
     )
 }
