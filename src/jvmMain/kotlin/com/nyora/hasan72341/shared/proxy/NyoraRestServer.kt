@@ -89,6 +89,20 @@ class NyoraRestServer(
     // parties); harmless for the same-origin desktop/localhost helper. Set
     // NYORA_CORS=0 to disable.
     private val corsEnabled: Boolean = System.getenv("NYORA_CORS") != "0",
+<<<<<<< HEAD
+||||||| bd901ee
+    // Emit permissive CORS headers on responses. Harmless for the same-origin
+    // web UI; useful if the API is ever consumed cross-origin.
+    private val corsEnabled: Boolean = staticRoot != null,
+=======
+    // Source-availability gate. When this returns false, all source/content
+    // endpoints respond as if no sources exist — so nothing can be listed,
+    // browsed, or fetched (even by a direct localhost probe) until a caller
+    // flips it on. Defaults to always-on, so the hosted web helper and the
+    // mac/linux desktop apps are unaffected; the Windows app supplies a real
+    // gate backed by its signed source-repository state.
+    private val sourcesEnabled: () -> Boolean = { true },
+>>>>>>> a020724
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -115,6 +129,7 @@ class NyoraRestServer(
     fun start(): String {
         if (server != null) return baseUrl
         val httpServer = HttpServer.create(InetSocketAddress(host, port), 0).apply {
+<<<<<<< HEAD
             guardedContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
             guardedContext("/docs") { handleDocs(it) }
             guardedContext("/openapi.yaml") { handleOpenApiSpec(it) }
@@ -216,6 +231,156 @@ class NyoraRestServer(
             guardedContext("/ota/check") { handleOtaCheck(it) }
             guardedContext("/ota/status") { handleOtaStatus(it) }
             guardedContext("/") { handleRoot(it) }
+||||||| bd901ee
+            createContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
+            createContext("/sources/refresh") { handleRefresh(it) }
+            createContext("/sources/catalog") { handleCatalog(it) }
+            createContext("/sources/install") { handleInstall(it) }
+            createContext("/sources/uninstall") { handleUninstall(it) }
+            createContext("/sources/pin") { handlePin(it) }
+            createContext("/sources/filters") { handleFilters(it) }
+            createContext("/sources/popular") { handleBrowse(it, BrowseMode.POPULAR) }
+            createContext("/sources/latest") { handleBrowse(it, BrowseMode.LATEST) }
+            createContext("/sources/search") { handleBrowse(it, BrowseMode.SEARCH) }
+            createContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
+            createContext("/sources") { handleSources(it) }
+            createContext("/manga/details") { handleDetails(it) }
+            createContext("/manga/pages") { handlePages(it) }
+            createContext("/image") { handleImage(it) }
+            createContext("/library/history/record") { handleHistoryRecord(it) }
+            createContext("/library/history/remove") { handleHistoryRemove(it) }
+            createContext("/library/history/clear") { handleHistoryClear(it) }
+            createContext("/library/history") { handleHistory(it) }
+            createContext("/library/clear") { handleLibraryClear(it) }
+            createContext("/library/favourites/toggle") { handleFavouriteToggle(it) }
+            createContext("/library/favourites/check") { handleFavouriteCheck(it) }
+            createContext("/library/favourites") { handleFavourites(it) }
+            createContext("/library/bookmarks/add") { handleBookmarkAdd(it) }
+            createContext("/library/bookmarks/remove") { handleBookmarkRemove(it) }
+            createContext("/library/bookmarks/check") { handleBookmarkCheck(it) }
+            createContext("/library/bookmarks") { handleBookmarks(it) }
+            createContext("/library/updates/refresh") { handleUpdatesRefresh(it) }
+            createContext("/library/updates/seen") { handleUpdatesSeen(it) }
+            createContext("/library/updates") { handleUpdates(it) }
+            createContext("/local/scan") { handleLocalScan(it) }
+            createContext("/local/chapter") { handleLocalChapter(it) }
+            createContext("/local/image") { handleLocalImage(it) }
+            createContext("/search/global") { handleGlobalSearch(it) }
+            createContext("/library/categories/create") { handleCategoryCreate(it) }
+            createContext("/library/categories/rename") { handleCategoryRename(it) }
+            createContext("/library/categories/delete") { handleCategoryDelete(it) }
+            createContext("/library/categories/add") { handleCategoryAdd(it) }
+            createContext("/library/categories/remove") { handleCategoryRemove(it) }
+            createContext("/library/categories/manga") { handleCategoriesForManga(it) }
+            createContext("/library/categories") { handleCategories(it) }
+            createContext("/manga/prefs/save") { handleMangaPrefsSave(it) }
+            createContext("/manga/prefs/clear") { handleMangaPrefsClear(it) }
+            createContext("/manga/prefs") { handleMangaPrefs(it) }
+            createContext("/downloads/start") { handleDownloadStart(it) }
+            createContext("/downloads/enqueue") { handleDownloadEnqueue(it) }
+            createContext("/downloads/cancel") { handleDownloadCancel(it) }
+            createContext("/downloads/settings") { handleDownloadSettings(it) }
+            createContext("/settings/network") { handleNetworkSettings(it) }
+            createContext("/downloads") { handleDownloads(it) }
+            createContext("/stats") { handleStats(it) }
+            createContext("/suggestions") { handleSuggestions(it) }
+            createContext("/manga/alternatives") { handleAlternatives(it) }
+            createContext("/backup/export") { handleBackupExport(it) }
+            createContext("/backup/import") { handleBackupImport(it) }
+            createContext("/tracker/anilist/search") { handleAniListSearch(it) }
+            createContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
+            createContext("/supabase/status") { handleSupabaseStatus(it) }
+            createContext("/supabase/signin") { handleSupabaseSignIn(it) }
+            createContext("/supabase/signout") { handleSupabaseSignOut(it) }
+            createContext("/supabase/sync") { handleSupabaseSync(it) }
+            createContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
+            createContext("/supabase/has-local-data") { handleSupabaseHasLocalData(it) }
+            createContext("/ota/check") { handleOtaCheck(it) }
+            createContext("/ota/status") { handleOtaStatus(it) }
+            createContext("/") { handleRoot(it) }
+            executor = Executors.newCachedThreadPool()
+=======
+            createContext("/health") { respondJson(it, 200, buildJsonObject { put("status", "ok") }) }
+            createContext("/docs") { handleDocs(it) }
+            createContext("/openapi.yaml") { handleOpenApiSpec(it) }
+            createContext("/device/relay/poll") { handleDeviceRelayPoll(it) }
+            createContext("/device/relay/result") { handleDeviceRelayResult(it) }
+            // Source/content endpoints are gated: when sourcesEnabled() is false
+            // they behave as if no sources exist, so nothing is listable/browsable/
+            // fetchable even via a direct localhost probe.
+            createContext("/sources/refresh") { gatedSource(it) { handleRefresh(it) } }
+            createContext("/sources/catalog") { gatedSource(it) { handleCatalog(it) } }
+            createContext("/sources/install") { gatedSource(it) { handleInstall(it) } }
+            createContext("/sources/uninstall") { gatedSource(it) { handleUninstall(it) } }
+            createContext("/sources/pin") { gatedSource(it) { handlePin(it) } }
+            createContext("/sources/filters") { gatedSource(it) { handleFilters(it) } }
+            createContext("/sources/popular") { gatedSource(it) { handleBrowse(it, BrowseMode.POPULAR) } }
+            createContext("/sources/latest") { gatedSource(it) { handleBrowse(it, BrowseMode.LATEST) } }
+            createContext("/sources/search") { gatedSource(it) { handleBrowse(it, BrowseMode.SEARCH) } }
+            createContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
+            createContext("/sources") { gatedSource(it) { handleSources(it) } }
+            createContext("/manga/details") { gatedSource(it) { handleDetails(it) } }
+            createContext("/manga/pages") { gatedSource(it) { handlePages(it) } }
+            createContext("/image") { handleImage(it) }
+            createContext("/library/history/record") { handleHistoryRecord(it) }
+            createContext("/library/history/remove") { handleHistoryRemove(it) }
+            createContext("/library/history/clear") { handleHistoryClear(it) }
+            createContext("/library/history") { handleHistory(it) }
+            createContext("/library/clear") { handleLibraryClear(it) }
+            createContext("/library/favourites/toggle") { handleFavouriteToggle(it) }
+            createContext("/library/favourites/check") { handleFavouriteCheck(it) }
+            createContext("/library/favourites") { handleFavourites(it) }
+            createContext("/library/bookmarks/add") { handleBookmarkAdd(it) }
+            createContext("/library/bookmarks/remove") { handleBookmarkRemove(it) }
+            createContext("/library/bookmarks/check") { handleBookmarkCheck(it) }
+            createContext("/library/bookmarks") { handleBookmarks(it) }
+            createContext("/library/updates/refresh") { handleUpdatesRefresh(it) }
+            createContext("/library/updates/seen") { handleUpdatesSeen(it) }
+            createContext("/library/updates") { handleUpdates(it) }
+            createContext("/local/scan") { handleLocalScan(it) }
+            createContext("/local/chapter") { handleLocalChapter(it) }
+            createContext("/local/image") { handleLocalImage(it) }
+            createContext("/search/global") { handleGlobalSearch(it) }
+            createContext("/library/categories/create") { handleCategoryCreate(it) }
+            createContext("/library/categories/rename") { handleCategoryRename(it) }
+            createContext("/library/categories/delete") { handleCategoryDelete(it) }
+            createContext("/library/categories/add") { handleCategoryAdd(it) }
+            createContext("/library/categories/remove") { handleCategoryRemove(it) }
+            createContext("/library/categories/manga") { handleCategoriesForManga(it) }
+            createContext("/library/categories") { handleCategories(it) }
+            createContext("/manga/prefs/save") { handleMangaPrefsSave(it) }
+            createContext("/manga/prefs/clear") { handleMangaPrefsClear(it) }
+            createContext("/manga/prefs") { handleMangaPrefs(it) }
+            createContext("/downloads/start") { handleDownloadStart(it) }
+            createContext("/downloads/enqueue") { handleDownloadEnqueue(it) }
+            createContext("/downloads/cancel") { handleDownloadCancel(it) }
+            createContext("/downloads/settings") { handleDownloadSettings(it) }
+            createContext("/settings/network") { handleNetworkSettings(it) }
+            createContext("/downloads") { handleDownloads(it) }
+            createContext("/stats") { handleStats(it) }
+            createContext("/suggestions") { handleSuggestions(it) }
+            createContext("/manga/alternatives") { handleAlternatives(it) }
+            createContext("/backup/export") { handleBackupExport(it) }
+            createContext("/backup/import") { handleBackupImport(it) }
+            createContext("/tracker/anilist/search") { handleAniListSearch(it) }
+            createContext("/tracker/anilist/scrobble") { handleAniListScrobble(it) }
+            createContext("/tracker/myanimelist/search") { handleMalSearch(it) }
+            createContext("/tracker/myanimelist/scrobble") { handleMalScrobble(it) }
+            createContext("/tracker/kitsu/search") { handleKitsuSearch(it) }
+            createContext("/tracker/kitsu/scrobble") { handleKitsuScrobble(it) }
+            createContext("/tracker/shikimori/search") { handleShikimoriSearch(it) }
+            createContext("/tracker/shikimori/scrobble") { handleShikimoriScrobble(it) }
+            createContext("/supabase/status") { handleSupabaseStatus(it) }
+            createContext("/supabase/signin") { handleSupabaseSignIn(it) }
+            createContext("/supabase/register") { handleSupabaseRegister(it) }
+            createContext("/supabase/signout") { handleSupabaseSignOut(it) }
+            createContext("/supabase/sync") { handleSupabaseSync(it) }
+            createContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
+            createContext("/supabase/has-local-data") { handleSupabaseHasLocalData(it) }
+            createContext("/ota/check") { handleOtaCheck(it) }
+            createContext("/ota/status") { handleOtaStatus(it) }
+            createContext("/") { handleRoot(it) }
+>>>>>>> a020724
             executor = newServerExecutor()
             start()
         }
@@ -429,6 +594,17 @@ class NyoraRestServer(
         respondJson(exchange, 200, buildJsonObject { put("domain", domain) })
     }
 
+    /** If this is a CORS preflight (OPTIONS), answer it 204 with CORS headers and
+     *  return true so the caller stops. Non-simple requests (POST + JSON body)
+     *  preflight, so POST handlers must call this before their method check. */
+    private fun maybePreflight(exchange: HttpExchange): Boolean {
+        if (!exchange.requestMethod.equals("OPTIONS", ignoreCase = true)) return false
+        applyCors(exchange)
+        exchange.sendResponseHeaders(204, -1)
+        exchange.close()
+        return true
+    }
+
     private fun handleSources(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
@@ -501,6 +677,63 @@ class NyoraRestServer(
 
     private fun getJsSources(): List<com.nyora.hasan72341.shared.model.MangaSource> =
         com.nyora.hasan72341.shared.extension.nativeParserCatalog()
+<<<<<<< HEAD
+||||||| bd901ee
+    private fun getJsSources(): List<com.nyora.hasan72341.shared.model.MangaSource> {
+        val otaBase = com.nyora.hasan72341.shared.repository.SqlDelightLibraryRepository
+            .defaultDatabasePath()
+            .parent
+        val jsonText = com.nyora.hasan72341.shared.extension.ParserOtaUpdater.sources(otaBase)
+            ?: javaClass.classLoader.getResourceAsStream("parsers_sources.json")?.bufferedReader()?.readText()
+            ?: return emptyList()
+        val array = kotlinx.serialization.json.Json.parseToJsonElement(jsonText).let {
+            if (it is kotlinx.serialization.json.JsonArray) it else kotlinx.serialization.json.JsonArray(emptyList())
+        }
+        val sources = mutableListOf<com.nyora.hasan72341.shared.model.MangaSource>()
+        for (element in array) {
+            if (element !is kotlinx.serialization.json.JsonObject) continue
+            val idStr = element["id"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: continue
+            val titleStr = element["title"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: idStr
+            val domainStr = element["domain"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: ""
+            val localeStr = element["locale"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content ?: "all"
+            val isNsfw = element["isNsfw"]?.let { it as? kotlinx.serialization.json.JsonPrimitive }?.content?.toBoolean() ?: false
+            
+            sources.add(
+                com.nyora.hasan72341.shared.model.MangaSource(
+                    id = "parser:$idStr",
+                    name = com.nyora.hasan72341.shared.SourcePatches.TITLE_OVERRIDES[idStr] ?: titleStr,
+                    lang = localeStr,
+                    baseUrl = "https://$domainStr",
+                    isInstalled = false,
+                    isNsfw = isNsfw,
+                    engine = com.nyora.hasan72341.shared.model.SourceEngine.JavaScript,
+                    contentType = com.nyora.hasan72341.shared.model.SourceContentType.Manga,
+                    notes = "Built-in JS parser.",
+                    localPath = "classpath:parsers.bundle.js",
+                    canUninstall = false,
+                    installedAt = 0L,
+                )
+            )
+        }
+        return sources
+    }
+=======
+
+    /** Run [handler] only when sources are enabled; else respond as if empty. */
+    private fun gatedSource(exchange: HttpExchange, handler: (HttpExchange) -> Unit) {
+        if (sourcesEnabled()) handler(exchange) else respondNoSources(exchange)
+    }
+
+    /** Neutral "no sources" response — reveals nothing about the built-in catalog. */
+    private fun respondNoSources(exchange: HttpExchange) {
+        respondJson(exchange, 200, buildJsonObject {
+            putJsonArray("entries") {}
+            putJsonArray("sources") {}
+            putJsonArray("manga") {}
+            put("hasNext", false)
+        })
+    }
+>>>>>>> a020724
 
     private fun handleCatalog(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
@@ -788,6 +1021,7 @@ class NyoraRestServer(
         // otherwise bottleneck cached hits. Popular/Latest are identical for every
         // user; Search is query/user-specific → never cached.
         val cacheKey = if (mode != BrowseMode.SEARCH) "browse:${mode.name}:$id:$page:${params["f"].orEmpty()}" else null
+<<<<<<< HEAD
         // Serve-stale-while-revalidate: any cached copy (even expired) is returned
         // INSTANTLY so the user never waits on a cold upstream fetch; a stale copy
         // triggers a background refresh. Only a truly-never-seen key fetches inline.
@@ -800,6 +1034,10 @@ class NyoraRestServer(
                 return
             }
         }
+||||||| bd901ee
+=======
+        if (cacheKey != null) ResponseCache.get(cacheKey)?.let { respondJsonRaw(exchange, 200, it); return }
+>>>>>>> a020724
         val source = facade.listSources().firstOrNull { it.id == id }
             ?: return respondError(exchange, 404, "Unknown source: $id")
         val filters = parseFilters(params["f"])
@@ -848,6 +1086,7 @@ class NyoraRestServer(
                     BrowseMode.SEARCH -> service.search(query, page, filters)
                 }
             }
+<<<<<<< HEAD
         } finally {
             if (isSearch) com.nyora.hasan72341.shared.net.CloudflareInterceptor.searchFanoutActive.decrementAndGet()
         }
@@ -897,6 +1136,31 @@ class NyoraRestServer(
             } catch (_: Throwable) { /* keep the stale copy on failure */ } finally {
                 revalidating.remove(cacheKey)
             }
+||||||| bd901ee
+            respondJson(exchange, 200, json.encodeToJsonElement(
+                BrowseResponse(
+                    entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
+                    hasNextPage = result.hasNextPage,
+                ),
+            ))
+        } catch (error: Exception) {
+            respondError(exchange, 500, error.message ?: "Browse failed")
+=======
+            val body = json.encodeToString(
+                BrowseResponse.serializer(),
+                BrowseResponse(
+                    entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
+                    hasNextPage = result.hasNextPage,
+                ),
+            )
+            // only cache successful, non-empty pages (don't cache flukes/empties)
+            if (cacheKey != null && result.entries.isNotEmpty()) {
+                ResponseCache.put(cacheKey, body, 600_000) // 10 min
+            }
+            respondJsonRaw(exchange, 200, body)
+        } catch (error: Exception) {
+            respondError(exchange, 500, error.message ?: "Browse failed")
+>>>>>>> a020724
         }
     }
 
@@ -1795,7 +2059,31 @@ class NyoraRestServer(
         if (email.isNullOrBlank() || password.isNullOrBlank()) {
             return respondError(exchange, 400, "Missing 'email' or 'password'")
         }
+<<<<<<< HEAD
         val error = facade.nyoraSyncSignIn(email, password)
+||||||| bd901ee
+        val error = facade.supabaseSignInWithGoogle(idToken)
+=======
+        val error = facade.supabaseSignIn(email, password)
+        if (error == null) {
+            respondJson(exchange, 200, buildJsonObject { put("ok", true) })
+        } else {
+            respondError(exchange, 401, error)
+        }
+    }
+
+    private fun handleSupabaseRegister(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val params = exchange.query()
+        val email = params["email"]
+        val password = params["password"]
+        if (email.isNullOrBlank() || password.isNullOrBlank()) {
+            return respondError(exchange, 400, "Missing 'email' or 'password'")
+        }
+        val error = facade.supabaseRegister(email, password)
+>>>>>>> a020724
         if (error == null) {
             respondJson(exchange, 200, buildJsonObject { put("ok", true) })
         } else {
@@ -3130,6 +3418,7 @@ private val SWAGGER_UI_HTML: String = """
  * I/O-bound parser requests cost ~tens of MB instead of one OS-thread stack each — the
  * key to serving ~1k users in a tight RAM budget. Falls back to a bounded pool pre-21.
  */
+<<<<<<< HEAD
 /**
  * Overload + abuse guard applied to every route. Two protections so the small VM
  * degrades gracefully under load (target: survive 5k users) instead of thrashing:
@@ -3226,6 +3515,9 @@ private fun HttpServer.guardedContext(path: String, handler: HttpHandler) {
     createContext(path, handler).filters.add(GuardFilter)
 }
 
+||||||| bd901ee
+=======
+>>>>>>> a020724
 private fun newServerExecutor(): java.util.concurrent.Executor =
     runCatching {
         java.util.concurrent.Executors::class.java

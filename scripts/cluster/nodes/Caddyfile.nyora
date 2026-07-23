@@ -237,7 +237,7 @@ log {
 
 # Legacy host — serves the app so its index.html migration script carries
 # the visitors library to web.nyora.xyz (moved off Cloudflare Pages).
-nyoramanga.hasanraza.tech {
+web.nyora.xyz {
     # Legacy host serves the same SPA (/var/www/nyora-web) → same hardened headers
     # as web.nyora.xyz, incl. the CSP whose script hashes match index.html's inline
     # bootstrap scripts (keep in sync with the web.nyora.xyz block above).
