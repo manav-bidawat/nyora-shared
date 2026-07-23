@@ -125,12 +125,14 @@ class NyoraRestServer(
             guardedContext("/sources/install") { handleInstall(it) }
             guardedContext("/sources/uninstall") { handleUninstall(it) }
             guardedContext("/sources/pin") { handlePin(it) }
+            guardedContext("/sources/setInstalled") { handleSetInstalled(it) }
             guardedContext("/sources/filters") { handleFilters(it) }
             guardedContext("/sources/popular") { handleBrowse(it, BrowseMode.POPULAR) }
             guardedContext("/sources/latest") { handleBrowse(it, BrowseMode.LATEST) }
             guardedContext("/sources/search") { handleBrowse(it, BrowseMode.SEARCH) }
             guardedContext("/cloudflare/clearance") { handleCloudflareClearance(it) }
             guardedContext("/sources") { handleSources(it) }
+            guardedContext("/sources/domain") { handleSourceDomain(it) }
             guardedContext("/manga/details") { handleDetails(it) }
             guardedContext("/manga/pages") { handlePages(it) }
             guardedContext("/image") { handleImage(it) }
@@ -192,6 +194,7 @@ class NyoraRestServer(
             guardedContext("/tracker/shikimori/state") { handleTrackerState(it) }
             guardedContext("/tracker/bangumi/state") { handleTrackerState(it) }
             guardedContext("/tracker/mangabaka/state") { handleTrackerState(it) }
+            // Server-side OAuth login bridge (for web / thin clients).
             guardedContext("/tracker/anilist/authorize") { handleTrackerAuthorize(it) }
             guardedContext("/tracker/anilist/callback") { handleTrackerCallback(it) }
             guardedContext("/tracker/myanimelist/authorize") { handleTrackerAuthorize(it) }
@@ -203,13 +206,13 @@ class NyoraRestServer(
             guardedContext("/tracker/mangabaka/authorize") { handleTrackerAuthorize(it) }
             guardedContext("/tracker/mangabaka/callback") { handleTrackerCallback(it) }
             guardedContext("/tracker/kitsu/login") { handleKitsuLogin(it) }
-            guardedContext("/supabase/status") { handleSupabaseStatus(it) }
-            guardedContext("/supabase/signin") { handleSupabaseSignIn(it) }
-            guardedContext("/supabase/register") { handleSupabaseRegister(it) }
-            guardedContext("/supabase/signout") { handleSupabaseSignOut(it) }
-            guardedContext("/supabase/sync") { handleSupabaseSync(it) }
-            guardedContext("/supabase/restore-from-cloud") { handleSupabaseRestoreFromCloud(it) }
-            guardedContext("/supabase/has-local-data") { handleSupabaseHasLocalData(it) }
+            guardedContext("/nyorasync/status") { handleNyoraSyncStatus(it) }
+            guardedContext("/nyorasync/signin") { handleNyoraSyncSignIn(it) }
+            guardedContext("/nyorasync/register") { handleNyoraSyncRegister(it) }
+            guardedContext("/nyorasync/signout") { handleNyoraSyncSignOut(it) }
+            guardedContext("/nyorasync/sync") { handleNyoraSync(it) }
+            guardedContext("/nyorasync/restore-from-cloud") { handleNyoraSyncRestoreFromCloud(it) }
+            guardedContext("/nyorasync/has-local-data") { handleNyoraSyncHasLocalData(it) }
             guardedContext("/ota/check") { handleOtaCheck(it) }
             guardedContext("/ota/status") { handleOtaStatus(it) }
             guardedContext("/") { handleRoot(it) }
@@ -416,12 +419,57 @@ class NyoraRestServer(
         return true
     }
 
+    /** The live domain (host) of a source — used by the app to open the manual Cloudflare
+     *  solver for it (parser sources carry an empty baseUrl, so the app can't derive it). */
+    private fun handleSourceDomain(exchange: HttpExchange) {
+        val id = exchange.query()["id"] ?: return respondError(exchange, 400, "Missing 'id'")
+        val source = facade.listSources().firstOrNull { it.id == id }
+            ?: return respondError(exchange, 404, "Unknown source: $id")
+        val domain = try { openInstalled(source).domain } catch (_: Exception) { "" }
+        respondJson(exchange, 200, buildJsonObject { put("domain", domain) })
+    }
+
     private fun handleSources(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
         val sources = facade.listSources().filter(::isJsParserSource)
-        respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(sources)))
+        ensureFaviconWarm(sources)
+        val withIcons = sources.map { s -> faviconCache[s.id]?.let { s.copy(iconUrl = it) } ?: s }
+        respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(withIcons)))
+    }
+
+    // Favicons for the Explore source grid. A source's real domain only lives on its
+    // constructed parser (kotatsu bakes it into a ConfigKey and our overrides may move it),
+    // so we resolve it once per source — in the BACKGROUND, off the request path — and cache a
+    // favicon URL. Google's favicon service is used so Cloudflare-protected sites still resolve
+    // (the icon comes from Google, not the blocked origin). The client falls back to a language
+    // badge until the icon is warmed, and re-fetches once so warmed icons appear.
+    private val faviconCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val faviconWarmStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun ensureFaviconWarm(sources: List<MangaSource>) {
+        if (!faviconWarmStarted.compareAndSet(false, true)) return
+        val toWarm = sources.filter { !faviconCache.containsKey(it.id) }
+        val worker = Thread {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+            try {
+                val futures = toWarm.map { src ->
+                    pool.submit {
+                        val domain = try { openInstalled(src).domain } catch (_: Throwable) { "" }
+                        if (domain.isNotBlank()) {
+                            faviconCache[src.id] = "https://www.google.com/s2/favicons?sz=64&domain=$domain"
+                        }
+                    }
+                }
+                futures.forEach { try { it.get(20, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Throwable) {} }
+            } finally {
+                pool.shutdownNow()
+            }
+        }
+        worker.isDaemon = true
+        worker.name = "nyora-favicon-warm"
+        worker.start()
     }
 
     private fun handleRefresh(exchange: HttpExchange) {
@@ -564,6 +612,28 @@ class NyoraRestServer(
         respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(facade.listSources())))
     }
 
+    /**
+     * Bulk-replace the installed set: body is a JSON array of source ids. Every source in the
+     * list becomes `is_installed = true`, every other becomes false. Lets the macOS app mirror
+     * its client-side curated set into the engine DB (in ONE call, no per-source install storm)
+     * so Nyora Sync source-prefs sync pushes the user's real installed set.
+     */
+    private fun handleSetInstalled(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val raw = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+        val ids = runCatching {
+            (json.parseToJsonElement(raw) as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet()
+        }.getOrNull() ?: run { respondError(exchange, 400, "Expected a JSON array of ids"); return }
+        val library = facade.loadLibrary()
+        val updated = library.sources.map { it.copy(isInstalled = it.id in ids) }
+        facade.saveLibrary(library.copy(sources = updated))
+        ResponseCache.invalidate("catalog")
+        respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(facade.listSources().filter(::isJsParserSource))))
+    }
+
     private enum class BrowseMode { POPULAR, LATEST, SEARCH }
 
     /**
@@ -583,6 +653,19 @@ class NyoraRestServer(
         val cookieHeader = exchange.requestBody.readBytes().toString(Charsets.UTF_8).trim()
         if (cookieHeader.isBlank()) { respondError(exchange, 400, "Missing cookie body"); return }
         com.nyora.hasan72341.shared.net.injectClearanceCookies(domain, cookieHeader)
+        // The clearance was obtained by the app's WebView using NYORA_BROWSER_UA. Pin this
+        // host to that UA so the retried request presents the same UA the cookie is bound
+        // to — otherwise the parser's own UA makes Cloudflare reject the clearance.
+        com.nyora.hasan72341.shared.net.CloudflareInterceptor.noteNativeSolve(
+            domain,
+            com.nyora.hasan72341.shared.net.NYORA_BROWSER_UA,
+        )
+        // From now on, fetch this host through the WebView relay — the clearance only works
+        // from the browser session that solved it, not this JVM's OkHttp.
+        com.nyora.hasan72341.shared.net.WebViewRelay.enableForHost(domain)
+        // Drop cached browse pages so the next fetch runs fresh through the now-working relay
+        // instead of serving whatever was cached (empty/blocked) before the solve.
+        ResponseCache.invalidatePrefix("browse:")
         respondJson(exchange, 200, buildJsonObject {
             put("ok", true)
             put("domain", domain)
@@ -710,7 +793,9 @@ class NyoraRestServer(
         // triggers a background refresh. Only a truly-never-seen key fetches inline.
         if (cacheKey != null) {
             ResponseCache.peek(cacheKey)?.let { hit ->
-                respondJsonRaw(exchange, 200, hit.value)
+                // Re-proxy covers to the CURRENT port: the cache is disk-persisted, so a
+                // body cached by a previous launch embeds that launch's dead loopback port.
+                respondJsonRaw(exchange, 200, reproxyBrowseBody(hit.value))
                 if (hit.stale) revalidateBrowse(cacheKey, id, mode, page, params["f"])
                 return
             }
@@ -766,18 +851,40 @@ class NyoraRestServer(
         } finally {
             if (isSearch) com.nyora.hasan72341.shared.net.CloudflareInterceptor.searchFanoutActive.decrementAndGet()
         }
-        val body = json.encodeToString(
+        // Cache the RAW cover URLs (never a proxy URL) — the proxy port changes per launch
+        // and the cache is disk-persisted, so caching a proxied body would embed a dead
+        // port. Covers are proxied to the current port at serve time via reproxyBrowseBody.
+        val rawBody = json.encodeToString(
             BrowseResponse.serializer(),
-            BrowseResponse(
-                entries = result.entries.map { it.copy(coverUrl = proxyCoverUrl(it.coverUrl, source.baseUrl)) },
-                hasNextPage = result.hasNextPage,
-            ),
+            BrowseResponse(entries = result.entries, hasNextPage = result.hasNextPage),
         )
         if (cacheKey != null && result.entries.isNotEmpty()) {
-            ResponseCache.put(cacheKey, body, 600_000) // 10 min fresh window
+            ResponseCache.put(cacheKey, rawBody, 600_000) // 10 min fresh window
         }
-        return body
+        return reproxyBrowseBody(rawBody)
     }
+
+    /** Un-proxy a cover URL: if it is one of our own `…/image?u=<enc>` proxy URLs (possibly
+     *  carrying a stale port from a previous launch's disk-snapshot cache), decode it back
+     *  to the raw CDN url. Already-raw urls pass through untouched. */
+    private fun unproxyCover(url: String): String {
+        val marker = "/image?u="
+        val idx = url.indexOf(marker)
+        if (idx < 0) return url
+        val enc = url.substring(idx + marker.length).substringBefore('&')
+        return runCatching { URLDecoder.decode(enc, StandardCharsets.UTF_8) }.getOrDefault(url)
+    }
+
+    /** Rewrite a browse body's cover URLs to the CURRENT helper port. Handles both freshly
+     *  cached raw bodies and stale proxied bodies restored from the disk snapshot. Referer
+     *  is derived from the image origin in handleImage, so no source baseUrl is needed. */
+    private fun reproxyBrowseBody(body: String): String = runCatching {
+        val parsed = json.decodeFromString(BrowseResponse.serializer(), body)
+        json.encodeToString(
+            BrowseResponse.serializer(),
+            parsed.copy(entries = parsed.entries.map { it.copy(coverUrl = proxyCoverUrl(unproxyCover(it.coverUrl), "")) }),
+        )
+    }.getOrDefault(body)
 
     /** Refresh a stale browse entry in the background so the NEXT request is fresh
      *  — the current request already got an instant (stale) response. */
@@ -1539,7 +1646,21 @@ class NyoraRestServer(
             ?: return respondError(exchange, 400, "Missing 'u'")
         val headers = pairs.filter { it.first == "h" }.mapNotNull { (_, v) ->
             val colon = v.indexOf(':'); if (colon <= 0) null else v.substring(0, colon) to v.substring(colon + 1)
-        }.toMap()
+        }.toMap().toMutableMap()
+        // Hotlink/Cloudflare-protected cover CDNs (e.g. AnisaScans) 403 a refererless
+        // fetch, which turns into a 502 blank cover. proxyCoverUrl can only add a Referer
+        // when it knows the source baseUrl — and parser sources carry an empty baseUrl, so
+        // it never does. Mirror nyora-web's refererFromProxied: when no Referer was
+        // supplied, derive one from the image's OWN origin. Fixes covers + page images for
+        // every parser source in a single place.
+        if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+            runCatching {
+                val u = java.net.URI(url)
+                if (!u.scheme.isNullOrBlank() && !u.host.isNullOrBlank()) {
+                    headers["Referer"] = "${u.scheme}://${u.host}/"
+                }
+            }
+        }
         // This proxy is publicly reachable (Caddy → loopback), so the target is untrusted:
         // reject non-http URLs (no local-file reads) and private/internal hosts (no SSRF).
         try {
@@ -1646,13 +1767,13 @@ class NyoraRestServer(
         respondJson(exchange, status, buildJsonObject { put("error", message) })
     }
 
-    // ----- Supabase Sync -----
+    // ----- Nyora Sync Sync -----
 
-    private fun handleSupabaseStatus(exchange: HttpExchange) {
+    private fun handleNyoraSyncStatus(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        val config = com.nyora.hasan72341.shared.sync.SupabaseConfig
+        val config = com.nyora.hasan72341.shared.sync.NyoraSyncConfig
         respondJson(exchange, 200, buildJsonObject {
             put("isConfigured", config.isConfigured)
             put("isAuthenticated", config.isAuthenticated)
@@ -1664,7 +1785,7 @@ class NyoraRestServer(
         })
     }
 
-    private fun handleSupabaseSignIn(exchange: HttpExchange) {
+    private fun handleNyoraSyncSignIn(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
@@ -1674,7 +1795,7 @@ class NyoraRestServer(
         if (email.isNullOrBlank() || password.isNullOrBlank()) {
             return respondError(exchange, 400, "Missing 'email' or 'password'")
         }
-        val error = facade.supabaseSignIn(email, password)
+        val error = facade.nyoraSyncSignIn(email, password)
         if (error == null) {
             respondJson(exchange, 200, buildJsonObject { put("ok", true) })
         } else {
@@ -1682,7 +1803,7 @@ class NyoraRestServer(
         }
     }
 
-    private fun handleSupabaseRegister(exchange: HttpExchange) {
+    private fun handleNyoraSyncRegister(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
@@ -1692,7 +1813,7 @@ class NyoraRestServer(
         if (email.isNullOrBlank() || password.isNullOrBlank()) {
             return respondError(exchange, 400, "Missing 'email' or 'password'")
         }
-        val error = facade.supabaseRegister(email, password)
+        val error = facade.nyoraSyncRegister(email, password)
         if (error == null) {
             respondJson(exchange, 200, buildJsonObject { put("ok", true) })
         } else {
@@ -1700,39 +1821,39 @@ class NyoraRestServer(
         }
     }
 
-    private fun handleSupabaseSignOut(exchange: HttpExchange) {
+    private fun handleNyoraSyncSignOut(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        facade.supabaseSignOut()
+        facade.nyoraSyncSignOut()
         respondJson(exchange, 200, buildJsonObject { put("ok", true) })
     }
 
-    private fun handleSupabaseSync(exchange: HttpExchange) {
+    private fun handleNyoraSync(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
         runCatching {
-            facade.supabaseSyncNow()
+            facade.nyoraSyncNow()
         }.fold(
             onSuccess = { respondJson(exchange, 200, buildJsonObject { put("ok", true) }) },
-            onFailure = { respondError(exchange, 500, it.message ?: "Supabase sync failed") },
+            onFailure = { respondError(exchange, 500, it.message ?: "Nyora Sync sync failed") },
         )
     }
 
-    private fun handleSupabaseRestoreFromCloud(exchange: HttpExchange) {
+    private fun handleNyoraSyncRestoreFromCloud(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
         runCatching {
-            facade.supabaseRestoreFromCloud()
+            facade.nyoraSyncRestoreFromCloud()
         }.fold(
             onSuccess = { respondJson(exchange, 200, buildJsonObject { put("ok", true) }) },
-            onFailure = { respondError(exchange, 500, it.message ?: "Supabase restore failed") },
+            onFailure = { respondError(exchange, 500, it.message ?: "Nyora Sync restore failed") },
         )
     }
 
-    private fun handleSupabaseHasLocalData(exchange: HttpExchange) {
+    private fun handleNyoraSyncHasLocalData(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
@@ -1780,9 +1901,9 @@ class NyoraRestServer(
 
     private val scrobblerHttp by lazy { okhttp3.OkHttpClient() }
 
-    // Cloudflare-aware client (CloudflareInterceptor → FlareSolverr + cf_clearance
-    // replay, shared cookie jar) for tracker endpoints behind a CF challenge —
-    // notably Kitsu's OAuth token endpoint, which a bare datacenter POST can't pass.
+    // Cloudflare-aware client (CloudflareInterceptor → native WebView solve on this
+    // host + cf_clearance replay) for tracker endpoints behind a CF challenge —
+    // notably Kitsu's OAuth token endpoint, which a bare POST can't pass.
     private val cfHttp by lazy { buildOkHttpClient(networkConfig.snapshot()) }
 
     /// The `<slug>` in `/tracker/<slug>/{search,scrobble}`.
@@ -1851,14 +1972,8 @@ class NyoraRestServer(
             runBlocking {
                 scrobbler.updateProgress(mediaId, chapter = progress, status = status, rating = rating, comment = null)
             }
-        } catch (e: Exception) {
-            // 200 (not 5xx) with an ok:false body so the reason survives Cloudflare
-            // (which masks origin 5xx) and the web can show WHY the write was rejected.
-            respondJson(exchange, 200, buildJsonObject {
-                put("ok", false)
-                put("error", e.message ?: "update failed")
-            })
-            return
+        } catch (_: Exception) {
+            return respondError(exchange, 502, "Tracker update failed")
         }
         val out = buildJsonObject {
             put("ok", true)
@@ -1930,12 +2045,9 @@ class NyoraRestServer(
     )
 
     private val trackerAuthConfig: Map<String, TrackerAuth> = mapOf(
-        // AniList app 46414 is a confidential ("web") client — it does NOT allow
-        // the implicit grant (response_type=token → unsupported_grant_type after
-        // consent). Use the authorization-code flow with the client secret.
         "anilist" to TrackerAuth(
             "anilist", "https://anilist.co/api/v2/oauth/authorize",
-            "https://anilist.co/api/v2/oauth/token", "code", null, null, null, true,
+            "https://anilist.co/api/v2/oauth/token", "token", null, null, null, false,
         ),
         "myanimelist" to TrackerAuth(
             "myanimelist", "https://myanimelist.net/v1/oauth2/authorize",
@@ -1957,6 +2069,8 @@ class NyoraRestServer(
         ),
     )
 
+    private data class PendingAuth(val slug: String, val verifier: String?, val createdAt: Long)
+    private val pendingAuth = java.util.concurrent.ConcurrentHashMap<String, PendingAuth>()
 
     private fun trackerEnv(slug: String, suffix: String): String? =
         System.getenv("NYORA_TRK_${slug.uppercase()}_$suffix")?.takeIf { it.isNotBlank() }
@@ -1984,79 +2098,18 @@ class NyoraRestServer(
         return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
     }
 
-    // Stateless OAuth `state`: the slug + PKCE verifier + issue time are AES-GCM
-    // sealed *into* the state param, so any cluster node can finish the callback
-    // without shared storage (api.nyora.xyz is round-robin, so the callback may
-    // land on a different node than the authorize did). The key is shared across
-    // nodes via NYORA_OAUTH_STATE_KEY; absent it we use a per-process key, which
-    // is fine for a single node / local dev. Sealing also gives CSRF integrity
-    // (only a holder of the key can mint a valid state) and keeps the S256
-    // verifier encrypted rather than exposed in the redirect URL.
-    private val oauthStateKey: javax.crypto.SecretKey by lazy {
-        val secret = System.getenv("NYORA_OAUTH_STATE_KEY")?.takeIf { it.isNotBlank() }
-            ?.toByteArray(StandardCharsets.UTF_8)
-            ?: ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-        val keyBytes = java.security.MessageDigest.getInstance("SHA-256").digest(secret)
-        javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
-    }
-
-    private data class SealedState(val slug: String, val verifier: String?, val origin: String?)
-
-    // A web caller passes ?ro=<its origin> so the callback can relay the token back
-    // through that origin (BroadcastChannel), which survives a provider's COOP that
-    // nulls window.opener. Only ever relay to our own origins — never an
-    // attacker-controlled one (open-redirect / token exfiltration).
-    private val allowedOriginRe =
-        Regex("^https://([a-z0-9-]+\\.)*nyora\\.xyz$|^https?://(localhost|127\\.0\\.0\\.1)(:\\d{1,5})?$")
-
-    private fun oauthAllowedOrigin(raw: String): String? {
-        val o = raw.trim().trimEnd('/')
-        return if (allowedOriginRe.matches(o)) o else null
-    }
-
-    private fun oauthSealState(slug: String, verifier: String?, origin: String?): String {
-        val payload = buildJsonObject {
-            put("s", slug)
-            if (verifier != null) put("v", verifier)
-            if (origin != null) put("o", origin)
-            put("t", System.currentTimeMillis())
-        }.toString().toByteArray(StandardCharsets.UTF_8)
-        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, oauthStateKey, javax.crypto.spec.GCMParameterSpec(128, iv))
-        val ct = cipher.doFinal(payload)
-        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(iv + ct)
-    }
-
-    private fun oauthOpenState(state: String?, maxAgeMs: Long = 600_000L): SealedState? {
-        if (state.isNullOrBlank()) return null
-        return try {
-            val raw = java.util.Base64.getUrlDecoder().decode(state)
-            if (raw.size < 12 + 16) return null // iv + GCM tag
-            val iv = raw.copyOfRange(0, 12)
-            val ct = raw.copyOfRange(12, raw.size)
-            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, oauthStateKey, javax.crypto.spec.GCMParameterSpec(128, iv))
-            val obj = json.parseToJsonElement(cipher.doFinal(ct).toString(StandardCharsets.UTF_8)).jsonObject
-            val t = obj["t"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: return null
-            if (System.currentTimeMillis() - t > maxAgeMs) return null
-            val slug = obj["s"]?.jsonPrimitive?.contentOrNull ?: return null
-            SealedState(slug, obj["v"]?.jsonPrimitive?.contentOrNull, obj["o"]?.jsonPrimitive?.contentOrNull)
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private fun handleTrackerAuthorize(exchange: HttpExchange) {
         val slug = oauthPathSlug(exchange) ?: return respondError(exchange, 400, "bad slug")
         val cfg = trackerAuthConfig[slug] ?: return respondError(exchange, 404, "unknown tracker")
         val clientId = trackerEnv(slug, "ID")
             ?: return respondError(exchange, 501, "tracker '$slug' is not configured on this server")
+        val state = oauthRandomToken()
         val redirectUri = "${oauthPublicBaseUrl(exchange)}/tracker/$slug/callback"
         val sb = StringBuilder(cfg.authorizeUrl)
         sb.append("?client_id=").append(urlEncode(clientId))
         sb.append("&redirect_uri=").append(urlEncode(redirectUri))
         sb.append("&response_type=").append(cfg.responseType)
+        sb.append("&state=").append(urlEncode(state))
         var verifier: String? = null
         if (cfg.pkce != null) {
             verifier = oauthRandomToken()
@@ -2064,13 +2117,11 @@ class NyoraRestServer(
             sb.append("&code_challenge=").append(urlEncode(challenge))
             sb.append("&code_challenge_method=").append(cfg.pkce)
         }
-        // Stateless: seal slug + verifier + issue-time (+ the web caller's origin for
-        // the COOP-safe relay) into `state` — no server-side store, so the callback
-        // can land on any cluster node and still complete.
-        val returnOrigin = exchange.query()["ro"]?.let { oauthAllowedOrigin(it) }
-        val state = oauthSealState(slug, verifier, returnOrigin)
-        sb.append("&state=").append(urlEncode(state))
         if (cfg.scope != null) sb.append("&scope=").append(cfg.scope)
+        // Prune expired pending auths (>10 min) and record this one.
+        val cutoff = System.currentTimeMillis() - 600_000L
+        pendingAuth.entries.removeIf { it.value.createdAt < cutoff }
+        pendingAuth[state] = PendingAuth(slug, verifier, System.currentTimeMillis())
         applyCors(exchange)
         exchange.responseHeaders.add("Location", sb.toString())
         exchange.sendResponseHeaders(302, -1)
@@ -2089,14 +2140,13 @@ class NyoraRestServer(
         val err = params["error"]
         val code = params["code"]
         val state = params["state"]
-        val sealed = oauthOpenState(state)
-        val origin = sealed?.origin
         if (cfg == null || err != null || code.isNullOrBlank() || state.isNullOrBlank()) {
-            respondOauthResult(exchange, origin, slug, null, err ?: "no_code")
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, err ?: "no_code"))
             return
         }
-        if (sealed == null || sealed.slug != slug) {
-            respondOauthResult(exchange, origin, slug, null, "bad_state")
+        val pending = pendingAuth.remove(state)
+        if (pending == null || pending.slug != slug) {
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_state"))
             return
         }
         val raw = try {
@@ -2112,7 +2162,7 @@ class NyoraRestServer(
             add("code", code)
             add("redirect_uri", redirectUri)
             if (cfg.needsSecret) add("client_secret", trackerEnv(slug, "SECRET") ?: error("no secret"))
-            if (sealed.verifier != null) add("code_verifier", sealed.verifier)
+            if (pending.verifier != null) add("code_verifier", pending.verifier)
             serviceRequest(
                 url = cfg.tokenUrl,
                 method = "POST",
@@ -2123,22 +2173,16 @@ class NyoraRestServer(
                 userAgent = cfg.userAgent,
             ) ?: error("token request failed")
         } catch (_: Exception) {
-            respondOauthResult(exchange, origin, slug, null, "exchange_failed")
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "exchange_failed"))
             return
         }
         val obj = try {
             json.parseToJsonElement(raw).jsonObject
         } catch (_: Exception) {
-            respondOauthResult(exchange, origin, slug, null, "bad_token_response")
+            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, null, "bad_token_response"))
             return
         }
-        if (obj["access_token"]?.jsonPrimitive?.contentOrNull == null) {
-            // Surface the provider's own error instead of a silent "no token".
-            respondOauthResult(exchange, origin, slug, null,
-                obj["error"]?.jsonPrimitive?.contentOrNull ?: "no_access_token")
-            return
-        }
-        respondOauthResult(exchange, origin, slug, obj, null)
+        respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, state, obj, null))
     }
 
     private fun handleKitsuLogin(exchange: HttpExchange) {
@@ -2159,9 +2203,9 @@ class NyoraRestServer(
             "&client_id=dd031b32d2f56c990b1425efe6c42ad847e7fe3ab46bf1299f05ecd856bdb7dd" +
             "&client_secret=54d7307928f63414defd96399fc31ba847961ceaecef3a5fd93144e960c0e151"
         // Kitsu's OAuth token endpoint sits behind a Cloudflare "Just a moment"
-        // challenge (403 cf-mitigated) that a datacenter POST can't clear, so go
-        // through cfHttp (FlareSolverr solves it, then the POST is replayed with the
-        // cf_clearance cookie). The public /api/edge/* endpoints aren't challenged.
+        // challenge (403 cf-mitigated). Go through cfHttp so the CloudflareInterceptor
+        // clears it (native WebView solve on this host) and replays the POST with the
+        // cf_clearance cookie. The public /api/edge/* endpoints aren't challenged.
         val resp = try {
             val req = okhttp3.Request.Builder()
                 .url("https://kitsu.app/api/oauth/token")
@@ -2213,34 +2257,6 @@ class NyoraRestServer(
 </script></body></html>"""
     }
 
-    // COOP-safe result delivery for the web bridge. If the caller passed a validated
-    // origin, redirect the popup to <origin>/oauth.html#… — a same-origin page there
-    // relays the outcome to the opener via BroadcastChannel, which works even when a
-    // provider's Cross-Origin-Opener-Policy has nulled window.opener. Without an
-    // origin (native / legacy callers) fall back to the direct postMessage page.
-    private fun respondOauthResult(
-        exchange: HttpExchange, origin: String?, slug: String, token: JsonObject?, error: String?,
-    ) {
-        if (origin == null) {
-            respondHtml(exchange, 200, oauthTokenCallbackHtml(slug, exchange.query()["state"], token, error))
-            return
-        }
-        val frag = StringBuilder("slug=").append(urlEncode(slug))
-        token?.get("access_token")?.jsonPrimitive?.contentOrNull
-            ?.let { frag.append("&access_token=").append(urlEncode(it)) }
-        token?.get("refresh_token")?.jsonPrimitive?.contentOrNull
-            ?.let { frag.append("&refresh_token=").append(urlEncode(it)) }
-        if (error != null) frag.append("&error=").append(urlEncode(error))
-        // location.replace (not a Location header) so the token never lands in an
-        // intermediary's access log; oauth.html scrubs it from history on arrival.
-        // The ?t= cache-buster makes each relay a unique URL so the app's service
-        // worker (stale-while-revalidate on navigations) and any edge cache can't
-        // serve a stale oauth.html — we must always run the current relay script.
-        val target = "$origin/oauth.html?t=${System.currentTimeMillis()}#$frag"
-        respondHtml(exchange, 200,
-            "<!doctype html><html><body>Connecting…<script>location.replace(${oauthJsStr(target)})</script></body></html>")
-    }
-
     private fun oauthJsStr(s: String): String =
         "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("<", "\\u003c") + "\""
 
@@ -2252,8 +2268,7 @@ class NyoraRestServer(
         exchange.responseBody.use { it.write(bytes) }
     }
 
-
-    // ----- Tracker: AniList -----
+    // ----- Tracker: AniList (legacy per-service passthrough, superseded above) -----
     //
     // The Mac app sends the user's AniList personal access token in the
     // Authorization header on each call so we never persist credentials on

@@ -5,13 +5,12 @@ import java.nio.file.Path
 import java.util.Base64
 import java.util.Properties
 
-object SupabaseConfig {
-    // Non-confidential defaults so a freshly-cloned app repo runs without the dev
-    // .env.sync. The Supabase URL + publishable anon key and the OAuth client IDs
-    // are public by design (RLS protects the data; client IDs ship in every OAuth
-    // request). env vars / .env.sync override these via load().
-    var url: String = "https://stream.hasanraza.tech"
-    var anonKey: String = "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
+object NyoraSyncConfig {
+    // The production Nyora Sync backend (FastAPI/OAuth2/JWT) — the SAME endpoint the web app
+    // (nyora-web) talks to, so a user's library merges across web and desktop. Auth is the Bearer
+    // JWT only; there is no Nyora Sync apikey/anon key any more. Overridable via NYORA_SYNC_URL for
+    // dev/self-hosting.
+    var url: String = "https://sync.nyora.xyz"
     var accessToken: String = ""
     var refreshToken: String = ""
     var userId: String = ""
@@ -38,17 +37,21 @@ object SupabaseConfig {
             ?: env[key]?.takeIf { it.isNotBlank() }
             ?: res[key]?.takeIf { it.isNotBlank() }
 
-        // Self-hosted Nyora sync server (OAuth2/JWT — replaces Supabase + Google).
-        url = "https://stream.hasanraza.tech"
-        anonKey = cfg("SUPABASE_ANON_KEY")
-            ?: readProp(dataDir, "anon_key").takeIf { it.isNotBlank() }
-            ?: "sb_publishable_RZTcdZZlzb_UhYAxtB09AQ_URTEftE4"
+        // The Nyora sync server (OAuth2/JWT). Defaults to the web app's production endpoint
+        // so desktop and web sync the same account; env overrides allow dev/self-hosting.
+        url = cfg("NYORA_SYNC_URL") ?: "https://sync.nyora.xyz"
 
         cfg("GOOGLE_DESKTOP_CLIENT_ID")?.let { googleDesktopClientId = it }
         cfg("GOOGLE_SERVER_CLIENT_ID")?.let { googleServerClientId = it }
         cfg("GOOGLE_CLIENT_SECRET")?.let { googleClientSecret = it }
 
-        val tokenFile = dataDir.resolve("supabase_tokens.properties")
+        val tokenFile = dataDir.resolve("nyora-sync-tokens.properties")
+        // One-time migration: an older build stored the session under the Supabase-era filename.
+        // Rename it so returning users stay signed in after the token file was renamed.
+        val legacyTokenFile = dataDir.resolve("supabase_tokens.properties")
+        if (!Files.exists(tokenFile) && Files.exists(legacyTokenFile)) {
+            runCatching { Files.move(legacyTokenFile, tokenFile) }
+        }
         if (Files.exists(tokenFile)) {
             val p = Properties().also { it.load(Files.newBufferedReader(tokenFile)) }
             accessToken = p.getProperty("access_token", "")
@@ -66,13 +69,13 @@ object SupabaseConfig {
         p["user_id"] = userId
         p["email"] = email
         p["last_sync_timestamp"] = lastSyncTimestamp
-        Files.newBufferedWriter(dataDir.resolve("supabase_tokens.properties"))
+        Files.newBufferedWriter(dataDir.resolve("nyora-sync-tokens.properties"))
             .use { w -> p.store(w, null) }
     }
 
     fun clearTokens(dataDir: Path) {
         accessToken = ""; refreshToken = ""; userId = ""; email = ""; lastSyncTimestamp = "1970-01-01T00:00:00Z"
-        Files.deleteIfExists(dataDir.resolve("supabase_tokens.properties"))
+        Files.deleteIfExists(dataDir.resolve("nyora-sync-tokens.properties"))
     }
 
     fun parseUserIdFromJwt(token: String): String = runCatching {
@@ -90,7 +93,7 @@ object SupabaseConfig {
     }.getOrDefault("")
 
     private fun readProp(dataDir: Path, key: String): String {
-        val file = dataDir.resolve("supabase.properties")
+        val file = dataDir.resolve("nyora-sync-config.properties")
         if (!Files.exists(file)) return ""
         return Properties()
             .also { it.load(Files.newBufferedReader(file)) }
@@ -104,7 +107,7 @@ object SupabaseConfig {
     private fun readResourceProps(): Map<String, String> {
         val out = LinkedHashMap<String, String>()
         runCatching {
-            SupabaseConfig::class.java.getResourceAsStream("/nyora-oauth.properties")?.use { stream ->
+            NyoraSyncConfig::class.java.getResourceAsStream("/nyora-oauth.properties")?.use { stream ->
                 Properties().also { it.load(stream) }.forEach { (k, v) -> out[k.toString()] = v.toString() }
             }
         }

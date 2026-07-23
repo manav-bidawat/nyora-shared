@@ -18,7 +18,7 @@ import java.nio.file.Path
 import java.time.Instant
 
 /**
- * Pushes / pulls Nyora library data through the nyora-sync Supabase Edge Function.
+ * Pushes / pulls Nyora library data through the nyora-sync Nyora Sync Edge Function.
  *
  * Sync strategy: push-then-pull, last-write-wins via updated_at.
  * Call [syncAll] on a background thread (it blocks on HTTP).
@@ -27,14 +27,14 @@ import java.time.Instant
  *
  * Platforms covered: mac, linux, windows, web — all share this jvmMain module.
  */
-class SupabaseSync(
+class NyoraSync(
     private val repo: SqlDelightLibraryRepository,
     private val dataDir: Path,
     private val http: OkHttpClient = OkHttpClient(),
 ) {
     private val JSON_MT = "application/json; charset=utf-8".toMediaType()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val syncFunctionUrl get() = "${SupabaseConfig.url}/functions/v1/nyora-sync"
+    private val syncFunctionUrl get() = "${NyoraSyncConfig.url}/functions/v1/nyora-sync"
     private val INITIAL_SYNC_TIMESTAMP = "1970-01-01T00:00:00Z"
     private var pulledMangaRows: Map<String, SbManga> = emptyMap()
     private var pulledMangaSourceNames: Map<String, String> = emptyMap()
@@ -51,59 +51,65 @@ class SupabaseSync(
 
     private fun applyAuth(text: String) {
         val r = json.decodeFromString<AuthResponse>(text)
-        val previousUserId = SupabaseConfig.userId
-        val newUserId = SupabaseConfig.parseUserIdFromJwt(r.access_token)
-        val parsedEmail = SupabaseConfig.parseEmailFromJwt(r.access_token)
-        SupabaseConfig.accessToken = r.access_token
-        SupabaseConfig.refreshToken = r.refresh_token ?: ""
-        SupabaseConfig.userId = newUserId
-        if (parsedEmail.isNotBlank()) SupabaseConfig.email = parsedEmail
+        val previousUserId = NyoraSyncConfig.userId
+        val newUserId = NyoraSyncConfig.parseUserIdFromJwt(r.access_token)
+        val parsedEmail = NyoraSyncConfig.parseEmailFromJwt(r.access_token)
+        NyoraSyncConfig.accessToken = r.access_token
+        NyoraSyncConfig.refreshToken = r.refresh_token ?: ""
+        NyoraSyncConfig.userId = newUserId
+        if (parsedEmail.isNotBlank()) NyoraSyncConfig.email = parsedEmail
         if (previousUserId.isNotBlank() && previousUserId != newUserId) {
-            SupabaseConfig.lastSyncTimestamp = INITIAL_SYNC_TIMESTAMP
+            NyoraSyncConfig.lastSyncTimestamp = INITIAL_SYNC_TIMESTAMP
         }
-        SupabaseConfig.saveTokens(dataDir)
+        NyoraSyncConfig.saveTokens(dataDir)
     }
 
     /** OAuth2 password grant (form-encoded) → POST /auth/token. */
     fun signIn(email: String, password: String): Result<Unit> {
-        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
+        if (!NyoraSyncConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
         val body = okhttp3.FormBody.Builder()
             .add("grant_type", "password")
             .add("username", email.trim())
             .add("password", password)
             .build()
-        val req = Request.Builder().url("${SupabaseConfig.url}/auth/token").post(body).build()
+        val req = Request.Builder().url("${NyoraSyncConfig.url}/auth/token").post(body).build()
         return runCatching {
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string() ?: error("Empty body")
                 check(resp.isSuccessful) { "Sign-in failed ${resp.code}: $text" }
                 applyAuth(text)
+                // Nyora Sync's JWT carries only `sub` (no email claim), so persist the address
+                // the user actually signed in with for display.
+                NyoraSyncConfig.email = email.trim()
+                NyoraSyncConfig.saveTokens(dataDir)
             }
         }
     }
 
     /** Create an account → POST /auth/register {email,password}; returns tokens on success. */
     fun register(email: String, password: String): Result<Unit> {
-        if (!SupabaseConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
+        if (!NyoraSyncConfig.isConfigured) return Result.failure(IllegalStateException("Sync server not configured"))
         val body = json.encodeToString(mapOf("email" to email.trim(), "password" to password)).toRequestBody(JSON_MT)
-        val req = Request.Builder().url("${SupabaseConfig.url}/auth/register").post(body).build()
+        val req = Request.Builder().url("${NyoraSyncConfig.url}/auth/register").post(body).build()
         return runCatching {
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string() ?: error("Empty body")
                 check(resp.isSuccessful) { "Registration failed ${resp.code}: $text" }
                 applyAuth(text)
+                NyoraSyncConfig.email = email.trim()
+                NyoraSyncConfig.saveTokens(dataDir)
             }
         }
     }
 
     fun refreshToken(): Boolean {
-        if (!SupabaseConfig.isConfigured || SupabaseConfig.refreshToken.isBlank()) return false
+        if (!NyoraSyncConfig.isConfigured || NyoraSyncConfig.refreshToken.isBlank()) return false
         return runCatching {
             val body = okhttp3.FormBody.Builder()
                 .add("grant_type", "refresh_token")
-                .add("refresh_token", SupabaseConfig.refreshToken)
+                .add("refresh_token", NyoraSyncConfig.refreshToken)
                 .build()
-            val req = Request.Builder().url("${SupabaseConfig.url}/auth/token").post(body).build()
+            val req = Request.Builder().url("${NyoraSyncConfig.url}/auth/token").post(body).build()
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string() ?: return@use false
                 if (!resp.isSuccessful) return@use false
@@ -114,32 +120,32 @@ class SupabaseSync(
     }
 
     fun signOut() {
-        SupabaseConfig.clearTokens(dataDir)
+        NyoraSyncConfig.clearTokens(dataDir)
     }
 
     // ── Push ────────────────────────────────────────────────────────────────
 
     fun syncNow() {
-        if (!SupabaseConfig.isAuthenticated) return
+        if (!NyoraSyncConfig.isAuthenticated) return
         refreshToken()
-        val isBootstrap = SupabaseConfig.lastSyncTimestamp == INITIAL_SYNC_TIMESTAMP
-        val cutoff = if (isBootstrap) 0L else Instant.parse(SupabaseConfig.lastSyncTimestamp).toEpochMilli()
+        val isBootstrap = NyoraSyncConfig.lastSyncTimestamp == INITIAL_SYNC_TIMESTAMP
+        val cutoff = if (isBootstrap) 0L else Instant.parse(NyoraSyncConfig.lastSyncTimestamp).toEpochMilli()
         pushAll(cutoff)
-        pullAll(if (isBootstrap) INITIAL_SYNC_TIMESTAMP else SupabaseConfig.lastSyncTimestamp)
+        pullAll(if (isBootstrap) INITIAL_SYNC_TIMESTAMP else NyoraSyncConfig.lastSyncTimestamp)
     }
 
     fun restoreFromCloud() {
-        if (!SupabaseConfig.isAuthenticated) return
+        if (!NyoraSyncConfig.isAuthenticated) return
         refreshToken()
         repo.clearDatabase()
         pullAll(INITIAL_SYNC_TIMESTAMP)
     }
 
-    /** Push all library tables to Supabase. Runs on the caller's thread — use a background executor. */
+    /** Push all library tables to Nyora Sync. Runs on the caller's thread — use a background executor. */
     fun pushAll() {
-        if (!SupabaseConfig.isAuthenticated) return
-        val cutoff = if (SupabaseConfig.lastSyncTimestamp == INITIAL_SYNC_TIMESTAMP) 0L 
-                    else Instant.parse(SupabaseConfig.lastSyncTimestamp).toEpochMilli()
+        if (!NyoraSyncConfig.isAuthenticated) return
+        val cutoff = if (NyoraSyncConfig.lastSyncTimestamp == INITIAL_SYNC_TIMESTAMP) 0L 
+                    else Instant.parse(NyoraSyncConfig.lastSyncTimestamp).toEpochMilli()
         pushAll(cutoff)
     }
 
@@ -158,7 +164,7 @@ class SupabaseSync(
     private fun pushFavourites(cutoff: Long) {
         val favs = repo.allFavouritesIncludingDeleted()
         if (favs.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = mutableListOf<SbFavourite>()
         val mangaRows = mutableListOf<SbManga>()
@@ -192,7 +198,7 @@ class SupabaseSync(
     private fun pushHistory(cutoff: Long) {
         val history = repo.allHistoryIncludingDeleted()
         if (history.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = mutableListOf<SbHistory>()
         val mangaRows = mutableListOf<SbManga>()
@@ -218,7 +224,7 @@ class SupabaseSync(
     private fun pushBookmarks(cutoff: Long) {
         val bookmarks = repo.allBookmarksIncludingDeleted()
         if (bookmarks.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = mutableListOf<SbBookmark>()
         for (b in bookmarks) {
@@ -241,7 +247,7 @@ class SupabaseSync(
     private fun pushMangaPrefs() {
         val prefs = repo.allMangaPrefs()
         if (prefs.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = prefs.map { p ->
             SbMangaPrefs(
@@ -263,7 +269,7 @@ class SupabaseSync(
         // Include soft-deleted categories so deletions (e.g. duplicate cleanup) propagate.
         val cats = repo.categoriesForSync()
         if (cats.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = cats.map { c ->
             SbCategory(
@@ -279,7 +285,7 @@ class SupabaseSync(
     }
 
     private fun pushMangaCategories() {
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = repo.database.favouriteCategoryQueries.selectAllMangaCategories().executeAsList().map { 
             SbMangaCategory(user_id = uid, manga_id = it.manga_id, category_id = it.category_id.toString(), updated_at = now)
@@ -291,7 +297,7 @@ class SupabaseSync(
     private fun pushUpdates(cutoff: Long) {
         val updates = repo.allUpdatesIncludingDeleted()
         if (updates.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = mutableListOf<SbUpdate>()
         for (u in updates) {
@@ -310,7 +316,7 @@ class SupabaseSync(
     }
 
     private fun pushSourcePrefs() {
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val sources = repo.database.mangaSourceQueries.selectAll().executeAsList()
         if (sources.isEmpty()) return
         val now = Instant.now().toString()
@@ -319,7 +325,9 @@ class SupabaseSync(
                 user_id = uid,
                 source_id = s.id.toWireSourceId(),
                 is_pinned = s.is_pinned != 0L,
-                is_enabled = true,
+                // Mirror the web: is_enabled == "this source is in the user's installed set".
+                // (Was hardcoded true, which pushed every source as installed.)
+                is_enabled = s.is_installed != 0L,
                 updated_at = now
             )
         }
@@ -336,7 +344,7 @@ class SupabaseSync(
         // allTracking() includes tombstoned rows so soft-deletes propagate.
         val tracking = repo.allTracking()
         if (tracking.isEmpty()) return
-        val uid = SupabaseConfig.userId
+        val uid = NyoraSyncConfig.userId
         val now = Instant.now().toString()
         val rows = mutableListOf<SbTracking>()
         for (t in tracking) {
@@ -370,10 +378,10 @@ class SupabaseSync(
 
     // ── Pull ────────────────────────────────────────────────────────────────
 
-    /** Pull all library tables from Supabase and apply locally. */
+    /** Pull all library tables from Nyora Sync and apply locally. */
     fun pullAll() {
-        if (!SupabaseConfig.isAuthenticated) return
-        pullAll(SupabaseConfig.lastSyncTimestamp)
+        if (!NyoraSyncConfig.isAuthenticated) return
+        pullAll(NyoraSyncConfig.lastSyncTimestamp)
     }
 
     private fun pullAll(cutoff: String) {
@@ -388,8 +396,8 @@ class SupabaseSync(
         pullUpdates(cutoff)
         pullSourcePrefs(cutoff)
         pullTracking(cutoff)
-        SupabaseConfig.lastSyncTimestamp = Instant.now().toString()
-        SupabaseConfig.saveTokens(dataDir)
+        NyoraSyncConfig.lastSyncTimestamp = Instant.now().toString()
+        NyoraSyncConfig.saveTokens(dataDir)
         debug(
             "Cloud pull complete. manga=${repo.load().mangas.size} " +
                 "history=${repo.allHistoryIncludingDeleted().size} " +
@@ -441,7 +449,7 @@ class SupabaseSync(
                 )
                 repo.upsertManga(m)
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullManga failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullManga failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullFavourites(cutoff: String) {
@@ -460,7 +468,7 @@ class SupabaseSync(
                     }
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullFavourites failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullFavourites failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullHistory(cutoff: String) {
@@ -484,7 +492,7 @@ class SupabaseSync(
                     )
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullHistory failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullHistory failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullBookmarks(cutoff: String) {
@@ -507,7 +515,7 @@ class SupabaseSync(
                     }
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullBookmarks failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullBookmarks failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullCategories(cutoff: String) {
@@ -528,7 +536,7 @@ class SupabaseSync(
             }
             // Collapse any duplicate-title categories that arrived from legacy per-device seeds.
             repo.dedupeCategories()
-        }.onFailure { System.err.println("[SupabaseSync] pullCategories failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullCategories failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullUpdates(cutoff: String) {
@@ -541,7 +549,7 @@ class SupabaseSync(
                     latestChapterTitle = row.latest_chapter_title,
                 )
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullUpdates failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullUpdates failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullSourcePrefs(cutoff: String) {
@@ -556,9 +564,17 @@ class SupabaseSync(
                     if (currentPinned != row.is_pinned) {
                         repo.database.mangaSourceQueries.togglePin(localId)
                     }
+                    // Apply the pulled installed set, mirroring the web (is_enabled drives the
+                    // local installed set). Previously the pull ignored is_enabled entirely.
+                    val currentInstalled = existing.is_installed != 0L
+                    if (currentInstalled != row.is_enabled) {
+                        repo.database.mangaSourceQueries.setInstalled(
+                            if (row.is_enabled) 1L else 0L, localId
+                        )
+                    }
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullSourcePrefs failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullSourcePrefs failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullTracking(cutoff: String) {
@@ -596,7 +612,7 @@ class SupabaseSync(
                     )
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullTracking failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullTracking failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullMangaCategories(cutoff: String) {
@@ -610,7 +626,7 @@ class SupabaseSync(
                     repo.addToCategory(row.manga_id, catId)
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullMangaCategories failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullMangaCategories failed: ${it.message}") }.getOrThrow()
     }
 
     private fun pullMangaPrefs(cutoff: String) {
@@ -630,7 +646,7 @@ class SupabaseSync(
                     )
                 )
             }
-        }.onFailure { System.err.println("[SupabaseSync] pullMangaPrefs failed: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] pullMangaPrefs failed: ${it.message}") }.getOrThrow()
     }
 
     // ── Edge Function Helpers ───────────────────────────────────────────────
@@ -639,18 +655,19 @@ class SupabaseSync(
         if (rows.isEmpty()) return
         runCatching {
             val body = json.encodeToString(UpsertRequest(table = table, rows = rows)).toRequestBody(JSON_MT)
+            // Nyora Sync (FastAPI/JWT) authenticates on the Bearer token only — no Nyora Sync
+            // apikey/anon header (that's a leftover the web client never sent either).
             val req = Request.Builder()
                 .url(syncFunctionUrl)
-                .header("apikey", SupabaseConfig.anonKey)
-                .header("Authorization", "Bearer ${SupabaseConfig.accessToken}")
+                .header("Authorization", "Bearer ${NyoraSyncConfig.accessToken}")
                 .post(body)
                 .build()
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    error("[SupabaseSync] upsert $table failed ${resp.code}: ${resp.body?.string()}")
+                    error("[NyoraSync] upsert $table failed ${resp.code}: ${resp.body?.string()}")
                 }
             }
-        }.onFailure { System.err.println("[SupabaseSync] upsert $table network error: ${it.message}") }.getOrThrow()
+        }.onFailure { System.err.println("[NyoraSync] upsert $table network error: ${it.message}") }.getOrThrow()
     }
 
     private fun fetch(table: String, cutoff: String? = null): String = runCatching {
@@ -664,19 +681,18 @@ class SupabaseSync(
         val body = request.toString().toRequestBody(JSON_MT)
         val req = Request.Builder()
             .url(syncFunctionUrl)
-            .header("apikey", SupabaseConfig.anonKey)
-            .header("Authorization", "Bearer ${SupabaseConfig.accessToken}")
+            .header("Authorization", "Bearer ${NyoraSyncConfig.accessToken}")
             .post(body)
             .build()
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
-                error("[SupabaseSync] fetch $table failed ${resp.code}: ${resp.body?.string()}")
+                error("[NyoraSync] fetch $table failed ${resp.code}: ${resp.body?.string()}")
             }
-            val text = resp.body?.string() ?: error("[SupabaseSync] fetch $table failed: empty body")
+            val text = resp.body?.string() ?: error("[NyoraSync] fetch $table failed: empty body")
             val obj = json.parseToJsonElement(text).asJsonObject
             obj["data"]?.toString() ?: "[]"
         }
-    }.onFailure { System.err.println("[SupabaseSync] fetch $table network error: ${it.message}") }.getOrThrow()
+    }.onFailure { System.err.println("[NyoraSync] fetch $table network error: ${it.message}") }.getOrThrow()
 
     private val kotlinx.serialization.json.JsonElement.asJsonObject: kotlinx.serialization.json.JsonObject
         get() = this as? kotlinx.serialization.json.JsonObject ?: kotlinx.serialization.json.JsonObject(emptyMap())
@@ -756,7 +772,7 @@ class SupabaseSync(
         )
     }
 
-    // ── DTOs (match Supabase column names) ───────────────────────────────────
+    // ── DTOs (match Nyora Sync column names) ───────────────────────────────────
 
     @Serializable private data class AuthResponse(
         val access_token: String,

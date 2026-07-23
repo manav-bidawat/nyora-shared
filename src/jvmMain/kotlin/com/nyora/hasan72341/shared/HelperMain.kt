@@ -46,9 +46,9 @@ object HelperMain {
         )
         val downloadManager = com.nyora.hasan72341.shared.download.DownloadManager(facade = facade)
 
-        // Supabase Sync initialization
+        // Nyora Sync Sync initialization
         val dataDir = SqlDelightLibraryRepository.defaultDatabasePath().parent
-        com.nyora.hasan72341.shared.sync.SupabaseConfig.load(dataDir)
+        com.nyora.hasan72341.shared.sync.NyoraSyncConfig.load(dataDir)
         
         // Always try loading .env.sync if it exists (prioritize these values)
 
@@ -62,11 +62,10 @@ object HelperMain {
             if (java.nio.file.Files.exists(envSync)) {
                 val props = java.util.Properties()
                 java.nio.file.Files.newInputStream(envSync).use { props.load(it) }
-                props.getProperty("SUPABASE_URL")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.url = it }
-                props.getProperty("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.anonKey = it }
-                props.getProperty("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleDesktopClientId = it }
-                props.getProperty("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleServerClientId = it }
-                props.getProperty("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.SupabaseConfig.googleClientSecret = it }
+                props.getProperty("NYORA_SYNC_URL")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.NyoraSyncConfig.url = it }
+                props.getProperty("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleDesktopClientId = it }
+                props.getProperty("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleServerClientId = it }
+                props.getProperty("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let { com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleClientSecret = it }
                 break
             }
         }
@@ -75,29 +74,30 @@ object HelperMain {
             if (Files.exists(envSync)) {
                 val props = java.util.Properties()
                 Files.newInputStream(envSync).use { props.load(it) }
-                com.nyora.hasan72341.shared.sync.SupabaseConfig.url = props.getProperty("SUPABASE_URL", "")
-                com.nyora.hasan72341.shared.sync.SupabaseConfig.anonKey = props.getProperty("SUPABASE_ANON_KEY", "")
+                props.getProperty("NYORA_SYNC_URL")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { com.nyora.hasan72341.shared.sync.NyoraSyncConfig.url = it }
                 props.getProperty("GOOGLE_DESKTOP_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let {
-                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleDesktopClientId = it
+                    com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleDesktopClientId = it
                 }
                 props.getProperty("GOOGLE_SERVER_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let {
-                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleServerClientId = it
+                    com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleServerClientId = it
                 }
                 props.getProperty("GOOGLE_CLIENT_SECRET")?.takeIf { it.isNotBlank() }?.let {
-                    com.nyora.hasan72341.shared.sync.SupabaseConfig.googleClientSecret = it
+                    com.nyora.hasan72341.shared.sync.NyoraSyncConfig.googleClientSecret = it
                 }
             }
         }
 
-        if (com.nyora.hasan72341.shared.sync.SupabaseConfig.isConfigured) {
-            val sync = com.nyora.hasan72341.shared.sync.SupabaseSync(repository, dataDir)
-            repository.supabaseSync = sync
+        if (com.nyora.hasan72341.shared.sync.NyoraSyncConfig.isConfigured) {
+            val sync = com.nyora.hasan72341.shared.sync.NyoraSync(repository, dataDir)
+            repository.nyoraSync = sync
             // Trigger an initial pull in the background if we are authenticated
-            if (com.nyora.hasan72341.shared.sync.SupabaseConfig.isAuthenticated) {
+            if (com.nyora.hasan72341.shared.sync.NyoraSyncConfig.isAuthenticated) {
                 Thread {
                     sync.refreshToken()
                     sync.pullAll()
-                }.also { it.isDaemon = true; it.name = "supabase-initial-pull" }.start()
+                }.also { it.isDaemon = true; it.name = "nyora-sync-initial-pull" }.start()
             }
         }
 
@@ -265,6 +265,16 @@ object HelperMain {
 
         if (!curatedMigrationDone) {
             runCatching { Files.writeString(curatedMarker, "v1") }
+        }
+
+        // One-time migration for returning users: remap legacy manga ids (details rows were
+        // keyed by url.hashCode) to the cross-platform nyoraId scheme so favourites/history/
+        // bookmarks survive the id change and merge with the web app on the next sync.
+        val mangaIdMarker = SqlDelightLibraryRepository.defaultDatabasePath().parent.resolve(".manga_id_nyora_v1")
+        if (!Files.exists(mangaIdMarker)) {
+            runCatching { repository.migrateMangaIdsToNyoraId() }
+                .onFailure { System.err.println("manga_id migration failed (non-fatal): ${it.message}") }
+            runCatching { Files.writeString(mangaIdMarker, "v1") }
         }
     }
 

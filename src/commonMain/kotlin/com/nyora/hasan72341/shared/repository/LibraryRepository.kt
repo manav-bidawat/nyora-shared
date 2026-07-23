@@ -92,12 +92,12 @@ interface LibraryRepository {
     fun allTracking(): List<TrackingRow> = emptyList()
     fun saveTracking(row: TrackingRow) {}
 
-    fun supabaseSignIn(email: String, password: String): String? = "Sync unavailable"
-    fun supabaseRegister(email: String, password: String): String? = "Sync unavailable"
-    fun supabaseSyncNow() {}
-    fun supabaseRestoreFromCloud() {}
+    fun nyoraSyncSignIn(email: String, password: String): String? = "Sync unavailable"
+    fun nyoraSyncRegister(email: String, password: String): String? = "Sync unavailable"
+    fun nyoraSyncNow() {}
+    fun nyoraSyncRestoreFromCloud() {}
     fun hasLocalSyncableData(): Boolean = false
-    fun supabaseSignOut() {}
+    fun nyoraSyncSignOut() {}
 }
 
 data class HistoryRow(

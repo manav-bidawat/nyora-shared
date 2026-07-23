@@ -41,6 +41,9 @@ INSERT OR REPLACE INTO manga_source (
 togglePin:
 UPDATE manga_source SET is_pinned = CASE is_pinned WHEN 0 THEN 1 ELSE 0 END WHERE id = :id;
 
+setInstalled:
+UPDATE manga_source SET is_installed = :installed WHERE id = :id;
+
 deleteById:
 DELETE FROM manga_source WHERE id = :id;
 
