@@ -43,15 +43,19 @@ class ScrobblerRepository(
 		fun persistent(http: OkHttpClient = OkHttpClient()): ScrobblerRepository =
 			ScrobblerRepository(http) { PersistentScrobblerTokenStore(it) }
 
-		/** Build a single scrobbler for [service] backed by [tokens]. */
-		fun create(service: ScrobblerService, tokens: ScrobblerTokenStore, http: OkHttpClient): Scrobbler =
-			when (service) {
-				ScrobblerService.ANILIST -> AniListScrobbler(tokens, http)
-				ScrobblerService.MAL -> MalScrobbler(tokens, http)
-				ScrobblerService.KITSU -> KitsuScrobbler(tokens, http)
-				ScrobblerService.SHIKIMORI -> ShikimoriScrobbler(tokens, http)
-				ScrobblerService.BANGUMI -> BangumiScrobbler(tokens, http)
-				ScrobblerService.MANGABAKA -> MangaBakaScrobbler(tokens, http)
-			}
+		/**
+		 * Build a single scrobbler for [service] backed by [tokens]. Used for
+		 * stateless, per-request construction (e.g. the REST server injects a
+		 * bearer token into an [InMemoryScrobblerTokenStore] per call).
+		 */
+		fun create(
+			service: ScrobblerService,
+			tokens: ScrobblerTokenStore,
+			http: OkHttpClient = OkHttpClient(),
+		): Scrobbler = when (service) {
+			ScrobblerService.ANILIST -> AniListScrobbler(tokens, http)
+			ScrobblerService.MAL -> MalScrobbler(tokens, http)
+			ScrobblerService.MANGABAKA -> MangaBakaScrobbler(tokens, http)
+		}
 	}
 }

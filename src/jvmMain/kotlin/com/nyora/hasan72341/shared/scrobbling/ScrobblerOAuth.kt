@@ -1,14 +1,17 @@
 package com.nyora.hasan72341.shared.scrobbling
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.Desktop
 import java.net.URI
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 
 /**
  * Desktop OAuth login orchestration for the tracker [Scrobbler]s (TS-011).
  *
- * The authorization-code services (AniList, MyAnimeList, Shikimori) are driven
+ * The authorization-code services (AniList, MyAnimeList, MangaBaka) are driven
  * through a [OAuthLoopbackServer]: we spin up a throw-away `http://127.0.0.1`
  * listener, point the scrobbler's [Scrobbler.redirectUri] at it, open the
  * consent page in the user's browser, wait for the service to redirect back
@@ -16,13 +19,10 @@ import java.util.Base64
  * in whatever [ScrobblerTokenStore] the scrobbler was built with (use
  * [ScrobblerRepository.persistent] so they survive a restart).
  *
- * Kitsu uses a resource-owner password grant instead of a redirect, so it goes
- * through [loginWithPassword].
- *
  * IMPORTANT (redirect URI registration): a loopback redirect only succeeds if
  * the service's registered OAuth application allows it. Some providers accept
  * any `http://127.0.0.1:<port>` for "installed app" style clients; AniList /
- * MAL / Shikimori generally require the *exact* redirect URI to be pre-listed
+ * MAL / MangaBaka generally require the *exact* redirect URI to be pre-listed
  * in the app's settings. If loopback is rejected, register the fixed
  * [FIXED_LOOPBACK_PORT] URI (or fall back to the built-in `nyora://` deep link
  * handled by the platform's URL-scheme handler and feed the captured code to
@@ -51,37 +51,27 @@ object ScrobblerOAuth {
 	 */
 	suspend fun login(
 		scrobbler: Scrobbler,
-		port: Int = FIXED_LOOPBACK_PORT,
 		timeoutMillis: Long = 300_000L,
 		openBrowser: (String) -> Unit = ::openInSystemBrowser,
 	): ScrobblerUser {
-		require(scrobbler.service != ScrobblerService.KITSU) {
-			"Kitsu uses password login — call loginWithPassword() instead"
-		}
+		// Desktop uses the same `nyora://<slug>-auth` deep-link redirect the
+		// mobile / mac apps use — the only redirect the providers have registered.
+		// The OS URL-scheme handler (see DesktopUrlScheme) routes the callback to
+		// DesktopOAuthCallbacks, which resolves the waiter keyed by this CSRF state.
+		// `redirectUri` stays at the scrobbler's nyora:// default (no override).
 		val state = randomState()
-		val server = OAuthLoopbackServer(requestedPort = port, expectedState = state)
+		val waiter = DesktopOAuthCallbacks.register(state)
 		return try {
-			scrobbler.redirectUri = server.redirectUri
-			// All code-grant services use a query-string authorize URL, so a
+			// All code-grant services use a query-string authorize URL, so the
 			// CSRF `state` param appends cleanly.
 			openBrowser(scrobbler.oauthUrl + "&state=" + state)
-			val code = server.awaitCode(timeoutMillis)
+			val code = withContext(Dispatchers.IO) {
+				waiter.get(timeoutMillis, TimeUnit.MILLISECONDS)
+			}
 			scrobbler.authorize(code)
 		} finally {
-			server.stop()
+			DesktopOAuthCallbacks.cancel(state)
 		}
-	}
-
-	/** Kitsu resource-owner password grant. */
-	suspend fun loginWithPassword(
-		scrobbler: Scrobbler,
-		username: String,
-		password: String,
-	): ScrobblerUser {
-		require(scrobbler.service == ScrobblerService.KITSU) {
-			"Password login is only supported for Kitsu"
-		}
-		return scrobbler.authorize("$username;$password")
 	}
 
 	/** Open [url] in the user's default browser; no-op-with-log if unsupported (headless). */

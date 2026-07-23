@@ -30,7 +30,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * the desktop UI needs (TS-008): [search], [getState] and [updateProgress],
  * plus the OAuth affordances ([oauthUrl] / [authorize]). Concrete
  * implementations live alongside this file: [AniListScrobbler], [MalScrobbler],
- * [KitsuScrobbler], [ShikimoriScrobbler].
+ * [MangaBakaScrobbler].
  *
  * All network calls block on OkHttp inside `Dispatchers.IO`.
  */
