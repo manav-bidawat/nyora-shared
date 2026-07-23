@@ -39,6 +39,10 @@ class AniListScrobbler(
 			"&redirect_uri=${enc(redirectUri)}&response_type=code"
 
 	override suspend fun authorize(code: String?): ScrobblerUser {
+		// AniList's registered client (46413) is confidential — it issues a secret
+		// and rejects the implicit grant with "unsupported_grant_type" — so this is
+		// the authorization-code grant: exchange the `code` delivered by the
+		// nyora:// deep link (or refresh) for tokens using the client id + secret.
 		val body = if (code != null) {
 			formBody(
 				"client_id" to service.clientId,

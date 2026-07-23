@@ -32,15 +32,19 @@ enum class ScrobblerService(
 		id = 2,
 		slug = "anilist",
 		title = "AniList",
-		clientId = "9887",
-		clientSecret = "wrMqFosItQWsmB8dtAHfIFPDt15FfQi2ZGiKkJoW",
+		// Nyora's AniList OAuth app (matches nyora-mac / Android). Confidential
+		// authorization-code client: it issues a secret and rejects the implicit
+		// grant, so the token exchange sends this secret (see AniListScrobbler).
+		clientId = "46413",
+		clientSecret = "1g354gn5JLiP0b0CyIJLk4SHCfq5d9Zip2ufxGHj",
 	),
 
 	MAL(
 		id = 3,
 		slug = "myanimelist",
+		// Nyora's MyAnimeList OAuth app (matches nyora-mac). PKCE public client.
+		clientId = "f3fec032a062ca0ba0c37330ca63730a",
 		title = "MyAnimeList",
-		clientId = "66e27ac5d5a1764e944677b42e2c4737",
 		clientSecret = null, // MAL uses PKCE (public client, no secret)
 	),
 
@@ -50,6 +54,15 @@ enum class ScrobblerService(
 		title = "Kitsu",
 		clientId = "dd031b32d2f56c990b1425efe6c42ad847e7fe3ab46bf1299f05ecd856bdb7dd",
 		clientSecret = "54d7307928f63414defd96399fc31ba847961ceaecef3a5fd93144e960c0e151",
+	),
+
+	MANGABAKA(
+		id = 6,
+		slug = "mangabaka",
+		title = "MangaBaka",
+		// Nyora's MangaBaka OAuth app (matches nyora-mac / Android). S256 PKCE public client.
+		clientId = "WFVyyltyYIteXTlesNaCnZwLnkjwGWRp",
+		clientSecret = null,
 	);
 
 	companion object {

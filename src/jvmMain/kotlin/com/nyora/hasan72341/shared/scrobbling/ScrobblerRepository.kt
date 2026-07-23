@@ -25,6 +25,7 @@ class ScrobblerRepository(
 					ScrobblerService.MAL -> MalScrobbler(store, http)
 					ScrobblerService.KITSU -> KitsuScrobbler(store, http)
 					ScrobblerService.SHIKIMORI -> ShikimoriScrobbler(store, http)
+					ScrobblerService.MANGABAKA -> MangaBakaScrobbler(store, http)
 				},
 			)
 		}

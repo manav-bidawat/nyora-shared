@@ -1,9 +1,12 @@
 package com.nyora.hasan72341.shared.scrobbling
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.Desktop
 import java.net.URI
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 
 /**
  * Desktop OAuth login orchestration for the tracker [Scrobbler]s (TS-011).
@@ -51,24 +54,29 @@ object ScrobblerOAuth {
 	 */
 	suspend fun login(
 		scrobbler: Scrobbler,
-		port: Int = FIXED_LOOPBACK_PORT,
 		timeoutMillis: Long = 300_000L,
 		openBrowser: (String) -> Unit = ::openInSystemBrowser,
 	): ScrobblerUser {
 		require(scrobbler.service != ScrobblerService.KITSU) {
 			"Kitsu uses password login — call loginWithPassword() instead"
 		}
+		// Desktop uses the same `nyora://<slug>-auth` deep-link redirect the
+		// mobile / mac apps use — the only redirect the providers have registered.
+		// The OS URL-scheme handler (see DesktopUrlScheme) routes the callback to
+		// DesktopOAuthCallbacks, which resolves the waiter keyed by this CSRF state.
+		// `redirectUri` stays at the scrobbler's nyora:// default (no override).
 		val state = randomState()
-		val server = OAuthLoopbackServer(requestedPort = port, expectedState = state)
+		val waiter = DesktopOAuthCallbacks.register(state)
 		return try {
-			scrobbler.redirectUri = server.redirectUri
-			// All code-grant services use a query-string authorize URL, so a
+			// All code-grant services use a query-string authorize URL, so the
 			// CSRF `state` param appends cleanly.
 			openBrowser(scrobbler.oauthUrl + "&state=" + state)
-			val code = server.awaitCode(timeoutMillis)
+			val code = withContext(Dispatchers.IO) {
+				waiter.get(timeoutMillis, TimeUnit.MILLISECONDS)
+			}
 			scrobbler.authorize(code)
 		} finally {
-			server.stop()
+			DesktopOAuthCallbacks.cancel(state)
 		}
 	}
 

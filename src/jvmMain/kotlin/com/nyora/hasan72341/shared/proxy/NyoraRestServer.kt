@@ -161,6 +161,7 @@ class NyoraRestServer(
             guardedContext("/downloads/start") { handleDownloadStart(it) }
             guardedContext("/downloads/enqueue") { handleDownloadEnqueue(it) }
             guardedContext("/downloads/cancel") { handleDownloadCancel(it) }
+            guardedContext("/downloads/clear") { handleDownloadClear(it) }
             guardedContext("/downloads/settings") { handleDownloadSettings(it) }
             guardedContext("/settings/network") { handleNetworkSettings(it) }
             guardedContext("/downloads") { handleDownloads(it) }
@@ -1038,6 +1039,16 @@ class NyoraRestServer(
         val id = exchange.query()["id"] ?: return respondError(exchange, 400, "Missing 'id'")
         dm.cancel(id)
         respondJson(exchange, 200, buildJsonObject { put("ok", true) })
+    }
+
+    /** Purge finished (completed/failed/cancelled) entries from the queue view. */
+    private fun handleDownloadClear(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val dm = downloads ?: return respondError(exchange, 503, "Downloads not enabled")
+        val removed = dm.clearFinished()
+        respondJson(exchange, 200, buildJsonObject { put("ok", true); put("removed", removed) })
     }
 
     private fun handleDownloadSettings(exchange: HttpExchange) {

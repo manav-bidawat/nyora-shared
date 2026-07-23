@@ -83,6 +83,21 @@ class DownloadManager(
         store[id] = (store[id] ?: return).copy(status = DownloadStatus.CANCELLED)
     }
 
+    /**
+     * Drop all finished entries (COMPLETED / FAILED / CANCELLED) from the in-memory
+     * queue view. Active entries (QUEUED / RUNNING) are left untouched. Returns the
+     * number of rows removed. Downloaded files on disk are not affected.
+     */
+    fun clearFinished(): Int {
+        val done = store.values
+            .filter { it.status == DownloadStatus.COMPLETED ||
+                      it.status == DownloadStatus.FAILED ||
+                      it.status == DownloadStatus.CANCELLED }
+            .map { it.id }
+        done.forEach { store.remove(it) }
+        return done.size
+    }
+
     private fun run(
         id: String,
         sourceId: String,

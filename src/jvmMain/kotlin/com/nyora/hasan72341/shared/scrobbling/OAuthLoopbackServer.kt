@@ -53,23 +53,39 @@ class OAuthLoopbackServer(
 				val html: String
 				val error = params["error"]
 				val code = params["code"]
+				val token = params["access_token"]   // implicit grant (e.g. AniList)
 				val state = params["state"]
 				when {
 					error != null -> {
 						result.completeExceptionally(IllegalStateException("OAuth error: $error"))
 						html = page("Authorization failed", "You can close this window and try again.")
 					}
-					expectedState != null && state != expectedState -> {
-						result.completeExceptionally(IllegalStateException("OAuth state mismatch"))
-						html = page("Authorization failed", "Security check failed. Please try again.")
+					code == null && token == null -> {
+						// No query params yet. An implicit-grant service (AniList) returns
+						// the token in the URL *fragment*, which the browser never sends to
+						// the server. Serve a tiny page that reflects location.hash back as a
+						// query so this same endpoint receives `access_token`. Auth-code
+						// services always arrive with `code`, so they skip this branch.
+						html = fragmentBouncePage(path)
 					}
-					code.isNullOrEmpty() -> {
-						result.completeExceptionally(IllegalStateException("OAuth callback missing code"))
-						html = page("Authorization failed", "No authorization code was returned.")
+					code != null -> {
+						if (expectedState != null && state != expectedState) {
+							result.completeExceptionally(IllegalStateException("OAuth state mismatch"))
+							html = page("Authorization failed", "Security check failed. Please try again.")
+						} else {
+							result.complete(code)
+							html = page("Signed in", "You can close this window and return to Nyora.")
+						}
 					}
 					else -> {
-						result.complete(code)
-						html = page("Signed in", "You can close this window and return to Nyora.")
+						// Implicit access token (from the fragment bounce above).
+						if (expectedState != null && state != null && state != expectedState) {
+							result.completeExceptionally(IllegalStateException("OAuth state mismatch"))
+							html = page("Authorization failed", "Security check failed. Please try again.")
+						} else {
+							result.complete(token!!)
+							html = page("Signed in", "You can close this window and return to Nyora.")
+						}
 					}
 				}
 				val bytes = html.toByteArray(Charsets.UTF_8)
@@ -114,6 +130,14 @@ class OAuthLoopbackServer(
 	}
 
 	private fun dec(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
+
+	private fun fragmentBouncePage(path: String): String =
+		"<!doctype html><html><head><meta charset=\"utf-8\"><title>Signing in\u2026</title></head>" +
+			"<body><script>" +
+			"var h=window.location.hash;" +
+			"if(h&&h.length>1){window.location.replace(window.location.pathname+'?'+h.substring(1));}" +
+			"else{document.body.textContent='No token returned. You can close this window.';}" +
+			"</script>Signing\u2026</body></html>"
 
 	private fun page(title: String, body: String): String =
 		"<!doctype html><html><head><meta charset=\"utf-8\"><title>$title</title>" +

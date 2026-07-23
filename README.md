@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://nyora.pages.dev/icon.png" width="120" alt="Nyora" />
+<img src="https://nyora.xyz/icon.png" width="120" alt="Nyora" />
 
 # Nyora — Shared Engine
 
@@ -20,7 +20,7 @@ The open-source, cross-platform Kotlin engine that powers **Translate**, **Sourc
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 ![GitHub stars](https://img.shields.io/github/stars/Hasan72341/nyora-shared?style=social)
 
-**[Product site](https://nyora.pages.dev) · [Web app](https://nyoraweb.pages.dev)**
+**[Product site](https://nyora.xyz) · [Web app](https://web.nyora.xyz)**
 
 </div>
 
@@ -31,7 +31,7 @@ The open-source, cross-platform Kotlin engine that powers **Translate**, **Sourc
 
 ## Overview
 
-`nyora-shared` is the **engine**, not an app — the common Kotlin Multiplatform / JVM **source** (`commonMain` + `jvmMain`) behind the three Nyora desktop clients. It is consumed as a **git submodule** by [`nyora-mac`](https://github.com/Hasan72341/nyora-mac), [`nyora-linux`](https://github.com/Hasan72341/nyora-linux) and [`nyora-windows`](https://github.com/Hasan72341/nyora-windows): each app's thin `:shared` Gradle module compiles `src/` via `srcDirs`, so there is **one source of truth** for the engine across all three platforms. Fix a parser bug once; bump the submodule everywhere.
+`nyora-shared` is the **engine**, not an app — the common Kotlin Multiplatform / JVM **source** (`commonMain` + `jvmMain`) behind the three Nyora desktop clients. It is consumed as a **git submodule** by [`nyora-mac`](https://github.com/Nyora-Manga/nyora-mac), [`nyora-linux`](https://github.com/Nyora-Manga/nyora-linux) and [`nyora-windows`](https://github.com/Nyora-Manga/nyora-windows): each app's thin `:shared` Gradle module compiles `src/` via `srcDirs`, so there is **one source of truth** for the engine across all three platforms. Fix a parser bug once; bump the submodule everywhere.
 
 It is original code, built from scratch — **source-compatible** with Kotatsu / Tachiyomi-style sources, not a fork. Nyora itself is a fast, free, ad-free, open-source manga reader with whole-page AI translation, 1000+ sources, offline downloads and cloud sync across every device; this repository is the shared foundation that keeps the desktop experience consistent.
 
@@ -247,7 +247,7 @@ This is the open-source engine that powers the Nyora desktop apps, and contribut
 
 **PR etiquette.** Keep commits focused and describe the engine-visible effect (a fixed source, an endpoint, a migration). Never commit real per-developer secrets — use `.env.sync` locally. Once a change lands here, it ships by **bumping the submodule** into each desktop app; because all three clients pin the same commit, an unbumped change is invisible to users (full steps under [Submodule Workflow](#submodule-workflow)).
 
-> A great parallel opportunity is **source porting in [`NyoraEngine`](https://github.com/Hasan72341/nyora-ios) (iOS)**: roughly **1,300 sources** still to port as mostly-mechanical template subclasses — highly parallelisable, friendly to first-timers, and entirely in a public repo. The framework and one template are done; the rest is largely filling in per-source specifics. It widens the catalogue everyone benefits from, on every platform.
+> A great parallel opportunity is **source porting in [`NyoraEngine`](https://github.com/Nyora-Manga/nyora-ios) (iOS)**: roughly **1,300 sources** still to port as mostly-mechanical template subclasses — highly parallelisable, friendly to first-timers, and entirely in a public repo. The framework and one template are done; the rest is largely filling in per-source specifics. It widens the catalogue everyone benefits from, on every platform.
 
 ## Submodule Workflow
 
@@ -255,7 +255,7 @@ This repository is meant to be checked out **inside** a consuming app, not on it
 
 ```bash
 # in a consuming app (e.g. nyora-linux)
-git clone --recurse-submodules https://github.com/Hasan72341/nyora-linux.git
+git clone --recurse-submodules https://github.com/Nyora-Manga/nyora-linux.git
 
 # bump the engine after changes land here
 cd nyora-shared && git pull origin main && cd ..
@@ -286,12 +286,12 @@ This engine powers the desktop trio (macOS, Windows, Linux). The consumer apps l
 
 | Platform | Repo | Get it |
 |---|---|---|
-| Android | [nyora-android](https://github.com/Hasan72341/nyora-android) | [APK](https://github.com/Hasan72341/nyora-android/releases/latest) |
-| macOS | [nyora-mac](https://github.com/Hasan72341/nyora-mac) | [.dmg / brew](https://github.com/Hasan72341/nyora-mac/releases/latest) |
-| Windows | [nyora-windows](https://github.com/Hasan72341/nyora-windows) | [.exe (x64/ARM64)](https://github.com/Hasan72341/nyora-windows/releases/latest) |
-| Linux | [nyora-linux](https://github.com/Hasan72341/nyora-linux) | [deb · rpm · curl](https://github.com/Hasan72341/nyora-linux/releases/latest) |
-| iOS / iPadOS | [nyora-ios](https://github.com/Hasan72341/nyora-ios) | [sideload IPA](https://github.com/Hasan72341/nyora-ios/releases/latest) |
-| Web | [nyora-web](https://github.com/Hasan72341/nyora-web) | [nyoraweb.pages.dev](https://nyoraweb.pages.dev) |
+| Android | [nyora-android](https://github.com/Nyora-Manga/nyora-android) | [APK](https://github.com/Nyora-Manga/nyora-android/releases/latest) |
+| macOS | [nyora-mac](https://github.com/Nyora-Manga/nyora-mac) | [.dmg / brew](https://github.com/Nyora-Manga/nyora-mac/releases/latest) |
+| Windows | [nyora-windows](https://github.com/Nyora-Manga/nyora-windows) | [.exe (x64/ARM64)](https://github.com/Nyora-Manga/nyora-windows/releases/latest) |
+| Linux | [nyora-linux](https://github.com/Nyora-Manga/nyora-linux) | [deb · rpm · curl](https://github.com/Nyora-Manga/nyora-linux/releases/latest) |
+| iOS / iPadOS | [nyora-ios](https://github.com/Nyora-Manga/nyora-ios) | [sideload IPA](https://github.com/Nyora-Manga/nyora-ios/releases/latest) |
+| Web | [nyora-web](https://github.com/Nyora-Manga/nyora-web) | [web.nyora.xyz](https://web.nyora.xyz) |
 | Shared engine | **nyora-shared (you are here)** | public submodule |
 
 ## Roadmap
@@ -307,7 +307,7 @@ Honest, already-implied directions for the engine — no dates, no promises:
 No. `nyora-shared` is a Kotlin source library consumed as a git submodule by the desktop apps. There is no standalone download or `main()` you launch to "get Nyora" — install a desktop client from [Nyora on Every Platform](#nyora-on-every-platform) instead.
 
 **Can I contribute to this repo?**
-Yes. The engine is open source (Apache-2.0) and public, and pull requests are welcome — parser fixes, REST endpoints, sync, store and downloads work all land here. Build it through a consuming desktop app's submodule, point sync at your own Nyora Cloud backend via `.env.sync`, and open a PR. See [Contributing](#contributing). Source porting in the public [`nyora-ios`](https://github.com/Hasan72341/nyora-ios) repo is another high-leverage place to help.
+Yes. The engine is open source (Apache-2.0) and public, and pull requests are welcome — parser fixes, REST endpoints, sync, store and downloads work all land here. Build it through a consuming desktop app's submodule, point sync at your own Nyora Cloud backend via `.env.sync`, and open a PR. See [Contributing](#contributing). Source porting in the public [`nyora-ios`](https://github.com/Nyora-Manga/nyora-ios) repo is another high-leverage place to help.
 
 **Is Nyora free, with ads or tracking?**
 Nyora is free, ad-free and has no trackers, and you never need an account just to read. This repository is the engine that keeps that true on desktop.
