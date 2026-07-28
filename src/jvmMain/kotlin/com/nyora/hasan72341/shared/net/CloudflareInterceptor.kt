@@ -44,18 +44,39 @@ internal object FlareSolverr {
     // Each solve spawns a headless Chrome. A batched all-source search hits many
     // CF sources at once, so cap concurrent solves (default 2) to stop a Chrome
     // swarm from saturating the small VM. Extra solves wait for a permit.
+    /** How long FlareSolverr may spend on one challenge. */
+    private val SOLVE_TIMEOUT_MS: Long =
+        System.getenv("NYORA_FLARESOLVERR_TIMEOUT_MS")?.toLongOrNull() ?: 60_000L
+
     private val maxConcurrent: Int = System.getenv("NYORA_FLARESOLVERR_CONCURRENCY")?.toIntOrNull()?.coerceIn(1, 8) ?: 2
     private val gate = java.util.concurrent.Semaphore(maxConcurrent)
 
     private val json = Json { ignoreUnknownKeys = true }
 
     // Separate client (no CF interceptor) so solving never recurses.
+    //
+    // The read timeout MUST be raised explicitly. A solve routinely takes 10-20s — a real
+    // Chrome has to load the page and sit through the challenge — while OkHttp's default
+    // read timeout is 10s, so every solve was abandoned a few seconds before it landed:
+    // FlareSolverr logged "Challenge solved!" and the helper had already given up and
+    // returned the 403. callTimeout alone does not help, it only bounds the whole call.
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .callTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(SOLVE_TIMEOUT_MS + 30_000L, TimeUnit.MILLISECONDS)
+        .callTimeout(SOLVE_TIMEOUT_MS + 60_000L, TimeUnit.MILLISECONDS)
         .build()
 
-    data class Solution(val cookieHeader: String, val userAgent: String)
+    /**
+     * [body] is the page FlareSolverr's own Chrome loaded once the challenge cleared.
+     * Kept because the cookie is frequently NOT replayable from this JVM (see the
+     * interceptor), and the fetched html is then the only way through.
+     */
+    data class Solution(
+        val cookieHeader: String,
+        val userAgent: String,
+        val status: Int,
+        val body: String,
+    )
 
     fun solve(url: String): Solution? {
         if (!enabled) return null
@@ -65,7 +86,7 @@ internal object FlareSolverr {
                 put("cmd", "request.get")
                 put("url", url)
                 // Shorter than the old 90s so a broad search isn't pinned per solve.
-                put("maxTimeout", System.getenv("NYORA_FLARESOLVERR_TIMEOUT_MS")?.toIntOrNull() ?: 30_000)
+                put("maxTimeout", SOLVE_TIMEOUT_MS.toInt())
             }.toString()
             val request = Request.Builder()
                 .url(endpoint)
@@ -84,7 +105,9 @@ internal object FlareSolverr {
                     val value = obj["value"]?.jsonPrimitive?.contentOrNull
                     if (name != null && value != null) "$name=$value" else null
                 }.joinToString("; ")
-                if (header.isBlank()) null else Solution(header, userAgent)
+                val status = solution["status"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                val body = solution["response"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                if (header.isBlank()) null else Solution(header, userAgent, status, body)
             }
         } catch (_: Throwable) {
             null
@@ -106,6 +129,27 @@ internal object FlareSolverr {
  */
 object CloudflareInterceptor : Interceptor {
     private val solvedUserAgent = ConcurrentHashMap<String, String>()
+
+    /**
+     * Hosts observed sitting behind a Cloudflare challenge.
+     *
+     * A challenge is only ever cleared by something with a browser: the desktop/iOS apps hand
+     * it to their own WebView, and a headless deployment needs FlareSolverr. The web app has
+     * neither — it talks to a hosted helper and cannot solve anything on its behalf — so these
+     * sources can never work for a browser client and the catalogue hides them there.
+     *
+     * Learned as challenges are met, so it stays current on its own; seeded from a validator
+     * sweep so a fresh deployment does not have to discover all of them the hard way.
+     */
+    private val challengedHosts = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** True when [host] is known to be challenge-gated. */
+    fun isChallenged(host: String): Boolean = host.lowercase() in challengedHosts
+
+    /** Record a challenge-gated host — called on detection, and to seed known ones. */
+    fun noteChallenged(host: String) {
+        if (host.isNotBlank()) challengedHosts.add(host.lowercase())
+    }
 
     /**
      * Register the User-Agent that solved a host's challenge via the app's native WebView.
@@ -195,11 +239,16 @@ object CloudflareInterceptor : Interceptor {
         // is the same: reach the site from a different (residential) egress.
         if (response.code != 403 && response.code != 503) {
             blockedUntil.remove(host) // recovered
+            challengedHosts.remove(host.lowercase())
             return response
         }
-        // During a broad search, never solve CF — fail fast so blocked sources are
-        // just skipped instead of pinning the VM with hundreds of Chrome solves.
-        if (searchFanoutActive.get() > 0) return response
+        // During a broad search, never *solve* CF — a fan-out must not pin the VM with
+        // hundreds of Chrome solves, nor pull a user's phone into relaying for sources
+        // they never asked for. It gates only those expensive paths, NOT the residential
+        // proxy below: that is a single cheap request over an already-open SOCKS hop, and
+        // skipping it made every datacenter-IP-blocked source (MangaFire) return zero
+        // search results while its details page — same host, same block — worked fine.
+        val searchFanout = searchFanoutActive.get() > 0
         // Fail fast for hosts we already know we can't get through — no re-solve churn.
         if (hostBlocked(host)) return response
         // Classify like nyora-android's CloudFlareHelper: a solvable interactive/JS
@@ -207,6 +256,9 @@ object CloudflareInterceptor : Interceptor {
         // beat the former but never the latter, so only the former should pop the browser.
         val protection = cfProtection(response)
         val challenge = protection == CfProtection.CHALLENGE
+        if (protection == CfProtection.CHALLENGE || protection == CfProtection.BLOCKED) {
+            noteChallenged(host)
+        }
 
         // 1) Native solve: hand the challenge to the host app's own WebView (macOS WKWebView).
         //    It solves on the user's real IP — passively first, and interactively if Turnstile
@@ -219,19 +271,37 @@ object CloudflareInterceptor : Interceptor {
         //    reputation, not the user. If the WebView is genuinely blocked too, the user closes
         //    it and we fall through / back off. (FlareSolverr + proxy paths below keep the
         //    stricter CHALLENGE-only gate: a headless solve can't beat a hard block.)
-        if (nativeSolver && (protection == CfProtection.CHALLENGE || protection == CfProtection.BLOCKED)) {
+        if (!searchFanout && nativeSolver && (protection == CfProtection.CHALLENGE || protection == CfProtection.BLOCKED)) {
             response.close()
             throw IOException("Cloudflare challenge: $host")
         }
 
         // 1b) Server-side solve: classic "Just a moment" JS challenges (cheap, fast).
         //     Headless-Chrome path, for hosts with no native WebView (the cluster).
-        if (challenge) {
+        if (!searchFanout && challenge) {
             val solution = FlareSolverr.solve(request.url.toString())
             if (solution != null) {
                 response.close()
                 injectClearanceCookies(host, solution.cookieHeader)
                 solvedUserAgent[host] = solution.userAgent
+                val retried = chain.proceed(
+                    request.newBuilder().header("User-Agent", solution.userAgent).build(),
+                )
+                if (retried.code != 403 && retried.code != 503) return retried
+
+                // The clearance did not survive the hop. Cloudflare binds cf_clearance to
+                // the TLS fingerprint that earned it, and OkHttp's is not Chrome's, so for
+                // a growing number of sites replaying the cookie is simply refused — the
+                // retry comes back 403 even though the solve succeeded.
+                //
+                // FlareSolverr already has the page: its own Chrome loaded it to clear the
+                // challenge. Hand that body back rather than throwing away a good fetch.
+                // GET only, since that is all `request.get` performs.
+                retried.close()
+                if (request.method == "GET" && solution.status in 200..299 && solution.body.isNotBlank()) {
+                    blockedUntil.remove(host)
+                    return solvedResponse(request, solution)
+                }
                 return chain.proceed(request.newBuilder().header("User-Agent", solution.userAgent).build())
             }
         }
@@ -253,17 +323,33 @@ object CloudflareInterceptor : Interceptor {
         //    residential IP + WebView-cleared session and streams the bytes back —
         //    the free way to use the CUSTOMER's IP despite the helper being on a VM.
         //    Beats both Turnstile AND datacenter-IP blocks (phone IP is residential).
-        val relayed = relayViaDevice(request)
-        if (relayed != null && relayed.code != 403 && relayed.code != 503) {
-            response.close()
-            return relayed
+        if (!searchFanout) {
+            val relayed = relayViaDevice(request)
+            if (relayed != null && relayed.code != 403 && relayed.code != 503) {
+                response.close()
+                return relayed
+            }
         }
 
         // Nothing got through — remember this host as blocked so we fail fast next
-        // time instead of re-solving it on every search.
-        blockedUntil[host] = System.currentTimeMillis() + blockTtlMs
+        // time instead of re-solving it on every search. Only when we actually
+        // exhausted every path: during a search fan-out the solves were skipped by
+        // design, so recording a block would wrongly suppress them for the next
+        // *detail* request too (blockTtlMs is 10 min — long enough to matter).
+        if (!searchFanout) blockedUntil[host] = System.currentTimeMillis() + blockTtlMs
         return response
     }
+
+    /** Wraps a FlareSolverr-fetched page as if the request itself had returned it. */
+    private fun solvedResponse(request: Request, solution: FlareSolverr.Solution): Response =
+        Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(solution.status)
+            .message("OK (flaresolverr)")
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(solution.body.toResponseBody("text/html; charset=utf-8".toMediaTypeOrNull()))
+            .build()
 
     private fun relayViaDevice(request: Request): Response? {
         if (!DeviceRelay.deviceAvailable()) return null

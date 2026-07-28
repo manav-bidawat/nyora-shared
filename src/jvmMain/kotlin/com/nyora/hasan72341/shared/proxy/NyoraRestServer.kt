@@ -15,6 +15,7 @@ import com.nyora.hasan72341.shared.model.Library
 import com.nyora.hasan72341.shared.model.Manga
 import com.nyora.hasan72341.shared.model.MangaChapter
 import com.nyora.hasan72341.shared.model.MangaPage
+import com.nyora.hasan72341.shared.SourceGates
 import com.nyora.hasan72341.shared.model.MangaSource
 import com.nyora.hasan72341.shared.reader.PageImageLoader
 import com.sun.net.httpserver.Filter
@@ -177,6 +178,10 @@ class NyoraRestServer(
             guardedContext("/manga/alternatives") { handleAlternatives(it) }
             guardedContext("/backup/export") { handleBackupExport(it) }
             guardedContext("/backup/import") { handleBackupImport(it) }
+            guardedContext("/backup/resolve") { handleBackupResolve(it) }
+            guardedContext("/backup/resolve/status") { handleBackupResolveStatus(it) }
+            guardedContext("/backup/resolve/one") { handleBackupResolveOne(it) }
+            guardedContext("/backup/resolve/stop") { handleBackupResolveStop(it) }
             guardedContext("/tracker/anilist/search") { handleTrackerSearch(it) }
             guardedContext("/tracker/anilist/scrobble") { handleTrackerScrobble(it) }
             guardedContext("/tracker/myanimelist/search") { handleTrackerSearch(it) }
@@ -434,7 +439,7 @@ class NyoraRestServer(
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        val sources = facade.listSources().filter(::isJsParserSource)
+        val sources = catalogueFor(exchange, facade.listSources().filter(::isJsParserSource))
         ensureFaviconWarm(sources)
         val withIcons = sources.map { s -> faviconCache[s.id]?.let { s.copy(iconUrl = it) } ?: s }
         respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(withIcons)))
@@ -493,7 +498,7 @@ class NyoraRestServer(
                 } else src
             }
             facade.saveLibrary(library.copy(sources = merged))
-            val visible = facade.listSources().filter(::isJsParserSource)
+            val visible = catalogueFor(exchange, facade.listSources().filter(::isJsParserSource))
             respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(visible)))
         } catch (error: Exception) {
             respondError(exchange, 500, error.message ?: "Refresh failed")
@@ -632,7 +637,13 @@ class NyoraRestServer(
         val updated = library.sources.map { it.copy(isInstalled = it.id in ids) }
         facade.saveLibrary(library.copy(sources = updated))
         ResponseCache.invalidate("catalog")
-        respondJson(exchange, 200, json.encodeToJsonElement(SourceListResponse(facade.listSources().filter(::isJsParserSource))))
+        respondJson(
+            exchange,
+            200,
+            json.encodeToJsonElement(
+                SourceListResponse(catalogueFor(exchange, facade.listSources().filter(::isJsParserSource))),
+            ),
+        )
     }
 
     private enum class BrowseMode { POPULAR, LATEST, SEARCH }
@@ -727,7 +738,7 @@ class NyoraRestServer(
             if (cover.isNotBlank()) {
                 // Persist so the next history load is instant.
                 facade.upsertManga(manga.copy(coverUrl = cover))
-                proxyCoverUrl(cover, source.baseUrl)
+                proxyCoverUrl(cover, refererBaseFor(source))
             } else {
                 ""
             }
@@ -740,8 +751,78 @@ class NyoraRestServer(
     private fun sourceBaseUrlFor(ref: com.nyora.hasan72341.shared.model.MangaSourceRef): String {
         val sid = openableHistorySourceId(ref, "")
         if (sid.isEmpty()) return ""
-        return facade.listSources().firstOrNull { it.id == sid }?.baseUrl ?: ""
+        val source = facade.listSources().firstOrNull { it.id == sid } ?: return ""
+        return refererBaseFor(source)
     }
+
+    // Resolved "https://<domain>" per source, for the image proxy's Referer.
+    private val refererBaseCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * True when this request came from a browser — i.e. the web app.
+     *
+     * A browser always sends `Origin` on a cross-origin call, and the web app is by definition
+     * cross-origin to the hosted helper. The desktop and iOS clients talk to a loopback helper
+     * with a plain HTTP client and send neither `Origin` nor `Sec-Fetch-*`, so this separates
+     * them without needing a client to identify itself.
+     *
+     * Set NYORA_WEB_CF_SOURCES=1 to serve challenge-gated sources to the web app anyway (for
+     * a deployment that does have a solver, e.g. one running FlareSolverr).
+     */
+    private fun isBrowserClient(exchange: HttpExchange): Boolean {
+        if (System.getenv("NYORA_WEB_CF_SOURCES") == "1") return false
+        val headers = exchange.requestHeaders
+        return !headers.getFirst("Origin").isNullOrBlank() ||
+            !headers.getFirst("Sec-Fetch-Mode").isNullOrBlank()
+    }
+
+    /**
+     * The catalogue as a given client can actually use it.
+     *
+     * For the web app, sources behind a Cloudflare challenge are removed: it has no way to
+     * solve one — no WebView of its own, and it reaches sources only through this helper — so
+     * they would appear in the picker and fail on every tap. Native clients get everything.
+     *
+     * Membership comes from [SourceGates.CLOUDFLARE_SOURCES] plus whatever
+     * [CloudflareInterceptor] has learned this run, matched on the source's live domain so a
+     * relocated source is judged by where it actually is.
+     */
+    private fun catalogueFor(exchange: HttpExchange, sources: List<MangaSource>): List<MangaSource> {
+        if (!isBrowserClient(exchange)) return sources
+        return sources.filterNot { source ->
+            val name = source.id.substringAfter(':')
+            name in SourceGates.CLOUDFLARE_SOURCES ||
+                com.nyora.hasan72341.shared.net.CloudflareInterceptor.isChallenged(
+                    refererBaseFor(source).removePrefix("https://").removePrefix("http://").trimEnd('/'),
+                )
+        }
+    }
+
+    /**
+     * The origin to send as `Referer` when fetching a source's images.
+     *
+     * Native parser sources carry `baseUrl = ""` — [nativeParserCatalog] cannot know a
+     * domain before the parser is constructed, and `ConfigKey.Domain` plus our overrides
+     * can move it afterwards. Every cover was therefore proxied WITHOUT a Referer, and
+     * every source that blocks hotlinking answered 403: covers came back blank in the
+     * grid, the library and history. Manganato is a clear case — its CDN returns 403 with
+     * no Referer and 200 with `https://www.manganato.gg/`.
+     *
+     * The parser knows its live domain, so ask it once and remember the answer.
+     */
+    private fun refererBaseFor(source: MangaSource): String = refererBaseCache.getOrPut(source.id) {
+        source.baseUrl.trim().trimEnd('/').ifEmpty {
+            runCatching { "https://" + openInstalled(source).domain.trim('/') }.getOrDefault("")
+        }
+    }
+
+    /**
+     * Same, by source id. The browse cache-hit path deliberately avoids
+     * `facade.listSources()` (it serializes on the DB lock), so take the memoised answer
+     * when there is one and only fall back to the lookup on the first hit per source.
+     */
+    private fun refererBaseForId(id: String): String = refererBaseCache[id]
+        ?: facade.listSources().firstOrNull { it.id == id }?.let { refererBaseFor(it) }.orEmpty()
 
     /**
      * Rewrite a reader page image URL to flow through the helper's /image proxy
@@ -796,7 +877,7 @@ class NyoraRestServer(
             ResponseCache.peek(cacheKey)?.let { hit ->
                 // Re-proxy covers to the CURRENT port: the cache is disk-persisted, so a
                 // body cached by a previous launch embeds that launch's dead loopback port.
-                respondJsonRaw(exchange, 200, reproxyBrowseBody(hit.value))
+                respondJsonRaw(exchange, 200, reproxyBrowseBody(hit.value, refererBaseForId(id)))
                 if (hit.stale) revalidateBrowse(cacheKey, id, mode, page, params["f"])
                 return
             }
@@ -862,7 +943,7 @@ class NyoraRestServer(
         if (cacheKey != null && result.entries.isNotEmpty()) {
             ResponseCache.put(cacheKey, rawBody, 600_000) // 10 min fresh window
         }
-        return reproxyBrowseBody(rawBody)
+        return reproxyBrowseBody(rawBody, refererBaseFor(source))
     }
 
     /** Un-proxy a cover URL: if it is one of our own `…/image?u=<enc>` proxy URLs (possibly
@@ -879,11 +960,11 @@ class NyoraRestServer(
     /** Rewrite a browse body's cover URLs to the CURRENT helper port. Handles both freshly
      *  cached raw bodies and stale proxied bodies restored from the disk snapshot. Referer
      *  is derived from the image origin in handleImage, so no source baseUrl is needed. */
-    private fun reproxyBrowseBody(body: String): String = runCatching {
+    private fun reproxyBrowseBody(body: String, refererBase: String): String = runCatching {
         val parsed = json.decodeFromString(BrowseResponse.serializer(), body)
         json.encodeToString(
             BrowseResponse.serializer(),
-            parsed.copy(entries = parsed.entries.map { it.copy(coverUrl = proxyCoverUrl(unproxyCover(it.coverUrl), "")) }),
+            parsed.copy(entries = parsed.entries.map { it.copy(coverUrl = proxyCoverUrl(unproxyCover(it.coverUrl), refererBase)) }),
         )
     }.getOrDefault(body)
 
@@ -920,7 +1001,7 @@ class NyoraRestServer(
             facade.upsertManga(manga)
             respondJson(exchange, 200, json.encodeToJsonElement(
                 DetailsResponse(
-                    manga = manga.copy(coverUrl = proxyCoverUrl(manga.coverUrl, source.baseUrl)),
+                    manga = manga.copy(coverUrl = proxyCoverUrl(manga.coverUrl, refererBaseFor(source))),
                     chapters = details.chapters,
                 ),
             ))
@@ -941,7 +1022,7 @@ class NyoraRestServer(
             ?: return respondError(exchange, 404, "Unknown source: $id")
         if (!refresh) {
             facade.cachedPages(url)?.let { cached ->
-                val proxied = cached.map { proxyPageUrl(it, source.baseUrl) }
+                val proxied = cached.map { proxyPageUrl(it, refererBaseFor(source)) }
                 respondJson(exchange, 200, json.encodeToJsonElement(PagesResponse(pages = proxied)))
                 return
             }
@@ -955,7 +1036,7 @@ class NyoraRestServer(
             // don't know the manga id at this point, so leave it as the source
             // id — the cache uses chapter_url as the unique key.
             facade.cachePages(url, id, pages)
-            val proxied = pages.map { proxyPageUrl(it, source.baseUrl) }
+            val proxied = pages.map { proxyPageUrl(it, refererBaseFor(source)) }
             respondJson(exchange, 200, json.encodeToJsonElement(PagesResponse(pages = proxied)))
         } catch (error: Exception) {
             respondError(exchange, 500, error.message ?: "Pages failed")
@@ -2797,119 +2878,34 @@ class NyoraRestServer(
 
     // ----- Backup -----
 
+    // ---------------------------------------------------------------------
+    // Backup / restore — Mihon `.tachibk` (gzipped protobuf).
+    //
+    // Nyora's old v2 JSON backup format is gone: export writes .tachibk only and
+    // import accepts .tachibk only. The point is that a Mihon user can hand their
+    // existing backup straight to Nyora and land in a working library.
+    // ---------------------------------------------------------------------
+
+    private val backupResolveQueue by lazy { com.nyora.hasan72341.shared.backup.ResolveQueue() }
+
+    private val backupResolver by lazy {
+        com.nyora.hasan72341.shared.backup.LibraryResolver(facade, backupResolveQueue)
+    }
+
     private fun handleBackupExport(exchange: HttpExchange) {
         if (!exchange.requestMethod.equals("GET", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        val payload = buildJsonObject {
-            put("version", 2)
-            put("exportedAt", System.currentTimeMillis())
-            put("favourites", kotlinx.serialization.json.JsonArray(
-                facade.favourites().map { mangaToJson(it) }
-            ))
-            put("history", kotlinx.serialization.json.JsonArray(
-                facade.history(limit = 100_000).map { row ->
-                    buildJsonObject {
-                        put("mangaId", row.manga.id)
-                        put("mangaTitle", row.manga.title)
-                        put("mangaCoverUrl", row.manga.coverUrl)
-                        put("sourceId", row.sourceId)
-                        put("chapterId", row.chapterId)
-                        put("chapterTitle", row.chapterTitle)
-                        put("page", row.page)
-                        put("percent", row.percent)
-                        put("updatedAt", row.updatedAt)
-                    }
-                }
-            ))
-            put("categories", kotlinx.serialization.json.JsonArray(
-                facade.favouriteCategories().map { cat ->
-                    buildJsonObject {
-                        put("id", cat.id)
-                        put("title", cat.title)
-                        put("sortKey", cat.sortKey)
-                        put("createdAt", cat.createdAt)
-                    }
-                }
-            ))
-            // Manga <-> category membership (kept separate so category ids can be
-            // remapped on import without losing which manga belong where).
-            put("mangaCategories", kotlinx.serialization.json.JsonArray(
-                facade.favourites().flatMap { manga ->
-                    facade.categoriesForManga(manga.id).map { cat ->
-                        buildJsonObject {
-                            put("mangaId", manga.id)
-                            put("categoryId", cat.id)
-                        }
-                    }
-                }
-            ))
-            put("bookmarks", kotlinx.serialization.json.JsonArray(
-                facade.bookmarks().map { bm ->
-                    buildJsonObject {
-                        put("mangaId", bm.mangaId)
-                        put("mangaTitle", bm.mangaTitle)
-                        put("mangaCoverUrl", bm.mangaCoverUrl)
-                        put("chapterId", bm.chapterId)
-                        put("chapterTitle", bm.chapterTitle)
-                        put("page", bm.page)
-                        put("note", bm.note)
-                        put("createdAt", bm.createdAt)
-                    }
-                }
-            ))
-            put("mangaPrefs", kotlinx.serialization.json.JsonArray(
-                facade.allMangaPrefs().map { p ->
-                    buildJsonObject {
-                        put("mangaId", p.mangaId)
-                        put("readerMode", p.readerMode)
-                        put("brightness", p.brightness)
-                        put("contrast", p.contrast)
-                        put("saturation", p.saturation)
-                        put("hue", p.hue)
-                        put("palette", p.palette)
-                    }
-                }
-            ))
-            put("sourcePrefs", kotlinx.serialization.json.JsonArray(
-                facade.listSources().map { s ->
-                    buildJsonObject {
-                        put("sourceId", s.id)
-                        put("isPinned", s.isPinned)
-                    }
-                }
-            ))
-            // Canonical cross-platform tracking section (snake_case, matching the
-            // server nyora_tracking table + the iOS/Android clients). Empty until the
-            // local tracking store (TS-010) is wired; the loop below then round-trips it.
-            put("tracking", kotlinx.serialization.json.JsonArray(
-                facade.allTracking().map { t ->
-                    buildJsonObject {
-                        put("tracker_id", t.trackerId)
-                        put("remote_id", t.remoteId)
-                        put("source_id", t.sourceId)
-                        put("manga_id", t.mangaId)
-                        put("title", t.title)
-                        put("status", t.status)
-                        put("score", t.score)
-                        put("last_read_chapter", t.lastReadChapter)
-                        put("last_read_volume", t.lastReadVolume)
-                        put("total_chapters", t.totalChapters)
-                        put("total_volumes", t.totalVolumes)
-                        put("chapter_offset", t.chapterOffset)
-                        put("started_at", t.startedAt)
-                        put("finished_at", t.finishedAt)
-                        put("comment", t.comment)
-                        put("updated_at", t.updatedAt)
-                        put("deleted_at", t.deletedAt)
-                    }
-                }
-            ))
+        val bytes = try {
+            com.nyora.hasan72341.shared.backup.MihonBackupExporter(facade, backupResolveQueue).export()
+        } catch (e: Exception) {
+            respondError(exchange, 500, "Backup failed: ${e.message}"); return
         }
-        val bytes = json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), payload)
-            .toByteArray(StandardCharsets.UTF_8)
-        exchange.responseHeaders.add("Content-Type", "application/json")
-        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"nyora-backup.json\"")
+        val stamp = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm"))
+        applyCors(exchange)
+        exchange.responseHeaders.add("Content-Type", "application/octet-stream")
+        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"nyora_$stamp.tachibk\"")
         exchange.sendResponseHeaders(200, bytes.size.toLong())
         exchange.responseBody.use { it.write(bytes) }
     }
@@ -2918,151 +2914,84 @@ class NyoraRestServer(
         if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
             respondText(exchange, 405, "Method not allowed"); return
         }
-        val raw = exchange.requestBody.bufferedReader().readText()
-        val root = try {
-            json.parseToJsonElement(raw).jsonObject
+        val bytes = exchange.requestBody.use { it.readBytes() }
+        if (bytes.isEmpty()) {
+            respondError(exchange, 400, "Empty request body"); return
+        }
+        val result = try {
+            com.nyora.hasan72341.shared.backup.MihonBackupImporter(facade, backupResolveQueue).import(bytes)
+        } catch (e: com.nyora.hasan72341.shared.backup.MihonBackupCodec.InvalidBackupException) {
+            respondError(exchange, 400, e.message ?: "Invalid backup file"); return
         } catch (e: Exception) {
-            respondError(exchange, 400, "Invalid JSON: ${e.message}"); return
+            respondError(exchange, 500, "Restore failed: ${e.message}"); return
         }
-        fun arr(key: String) = root[key] as? kotlinx.serialization.json.JsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
-        val favs = arr("favourites")
-        val hist = arr("history")
-        var importedFavs = 0
-        for (el in favs) {
-            val o = el.jsonObject
-            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: continue
-            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: continue
-            val coverUrl = o["coverUrl"]?.jsonPrimitive?.contentOrNull ?: ""
-            facade.upsertManga(com.nyora.hasan72341.shared.model.Manga(
-                id = id,
-                title = title,
-                coverUrl = coverUrl,
-            ))
-            // Toggle until favourited (toggleFavourite returns the new state).
-            var attempts = 0
-            while (!facade.isFavourited(id) && attempts < 2) {
-                facade.toggleFavourite(id); attempts++
-            }
-            importedFavs++
-        }
-        var importedHist = 0
-        for (el in hist) {
-            val o = el.jsonObject
-            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val sourceId = o["sourceId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val chapterId = o["chapterId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val chapterTitle = o["chapterTitle"]?.jsonPrimitive?.contentOrNull ?: ""
-            val page = o["page"]?.jsonPrimitive?.intOrNull ?: 0
-            val percent = o["percent"]?.jsonPrimitive?.floatOrNull ?: 0f
-            facade.recordHistory(mangaId, sourceId, chapterId, chapterTitle, page, percent)
-            importedHist++
-        }
-
-        // Categories: match existing by title (idempotent re-import), else create.
-        // Build backup-id -> local-id map so membership can be reattached below.
-        val catIdMap = HashMap<Long, Long>()
-        var importedCats = 0
-        for (el in arr("categories")) {
-            val o = el.jsonObject
-            val backupId = o["id"]?.jsonPrimitive?.longOrNull ?: continue
-            val title = o["title"]?.jsonPrimitive?.contentOrNull ?: continue
-            val existing = facade.favouriteCategories().firstOrNull { it.title == title }
-            val localId = existing?.id ?: facade.createCategory(title)
-            if (localId >= 0L) {
-                catIdMap[backupId] = localId
-                if (existing == null) importedCats++
-            }
-        }
-        var importedMangaCats = 0
-        for (el in arr("mangaCategories")) {
-            val o = el.jsonObject
-            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val backupCatId = o["categoryId"]?.jsonPrimitive?.longOrNull ?: continue
-            val localCatId = catIdMap[backupCatId] ?: continue
-            facade.addToCategory(mangaId, localCatId)
-            importedMangaCats++
-        }
-
-        var importedBookmarks = 0
-        for (el in arr("bookmarks")) {
-            val o = el.jsonObject
-            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val chapterId = o["chapterId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val chapterTitle = o["chapterTitle"]?.jsonPrimitive?.contentOrNull ?: ""
-            val page = o["page"]?.jsonPrimitive?.intOrNull ?: 0
-            val note = o["note"]?.jsonPrimitive?.contentOrNull ?: ""
-            if (facade.isPageBookmarked(mangaId, chapterId, page)) continue
-            facade.addBookmark(mangaId, chapterId, chapterTitle, page, note)
-            importedBookmarks++
-        }
-
-        var importedMangaPrefs = 0
-        for (el in arr("mangaPrefs")) {
-            val o = el.jsonObject
-            val mangaId = o["mangaId"]?.jsonPrimitive?.contentOrNull ?: continue
-            facade.saveMangaPrefs(com.nyora.hasan72341.shared.repository.MangaPrefsRow(
-                mangaId = mangaId,
-                readerMode = o["readerMode"]?.jsonPrimitive?.contentOrNull ?: "",
-                brightness = o["brightness"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
-                contrast = o["contrast"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
-                saturation = o["saturation"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
-                hue = o["hue"]?.jsonPrimitive?.doubleOrNull ?: 0.0,
-                palette = o["palette"]?.jsonPrimitive?.contentOrNull ?: "",
-            ))
-            importedMangaPrefs++
-        }
-
-        // Source pin state: only toggle when it differs from the current state.
-        var importedSourcePrefs = 0
-        val sources = facade.listSources()
-        for (el in arr("sourcePrefs")) {
-            val o = el.jsonObject
-            val sourceId = o["sourceId"]?.jsonPrimitive?.contentOrNull ?: continue
-            val wantPinned = o["isPinned"]?.jsonPrimitive?.booleanOrNull ?: continue
-            val src = sources.firstOrNull { it.id == sourceId } ?: continue
-            if (src.isPinned != wantPinned) {
-                facade.togglePin(sourceId)
-                importedSourcePrefs++
-            }
-        }
-
-        var importedTracking = 0
-        for (el in arr("tracking")) {
-            val o = el.jsonObject
-            val trackerId = o["tracker_id"]?.jsonPrimitive?.contentOrNull ?: continue
-            val mangaId = o["manga_id"]?.jsonPrimitive?.contentOrNull ?: continue
-            facade.saveTracking(com.nyora.hasan72341.shared.repository.TrackingRow(
-                trackerId = trackerId,
-                remoteId = o["remote_id"]?.jsonPrimitive?.contentOrNull ?: "",
-                sourceId = o["source_id"]?.jsonPrimitive?.contentOrNull ?: "",
-                mangaId = mangaId,
-                title = o["title"]?.jsonPrimitive?.contentOrNull ?: "",
-                status = o["status"]?.jsonPrimitive?.contentOrNull ?: "",
-                score = o["score"]?.jsonPrimitive?.floatOrNull ?: 0f,
-                lastReadChapter = o["last_read_chapter"]?.jsonPrimitive?.floatOrNull ?: 0f,
-                lastReadVolume = o["last_read_volume"]?.jsonPrimitive?.intOrNull ?: 0,
-                totalChapters = o["total_chapters"]?.jsonPrimitive?.intOrNull ?: 0,
-                totalVolumes = o["total_volumes"]?.jsonPrimitive?.intOrNull ?: 0,
-                chapterOffset = o["chapter_offset"]?.jsonPrimitive?.intOrNull ?: 0,
-                startedAt = o["started_at"]?.jsonPrimitive?.contentOrNull ?: "",
-                finishedAt = o["finished_at"]?.jsonPrimitive?.contentOrNull ?: "",
-                comment = o["comment"]?.jsonPrimitive?.contentOrNull ?: "",
-                updatedAt = o["updated_at"]?.jsonPrimitive?.contentOrNull ?: "",
-                deletedAt = o["deleted_at"]?.jsonPrimitive?.contentOrNull ?: "",
-            ))
-            importedTracking++
-        }
-
         respondJson(exchange, 200, buildJsonObject {
             put("ok", true)
-            put("importedFavourites", importedFavs)
-            put("importedHistory", importedHist)
-            put("importedCategories", importedCats)
-            put("importedMangaCategories", importedMangaCats)
-            put("importedBookmarks", importedBookmarks)
-            put("importedMangaPrefs", importedMangaPrefs)
-            put("importedSourcePrefs", importedSourcePrefs)
-            put("importedTracking", importedTracking)
+            put("manga", result.manga)
+            put("categories", result.categories)
+            put("history", result.history)
+            put("bookmarks", result.bookmarks)
+            put("tracking", result.tracking)
+            put("sourcesMatched", result.sourcesMatched)
+            put("sourcesBridged", result.sourcesBridged)
+            put("pendingResolution", result.pendingResolution)
+            put("missingSourceCategoryId", result.missingSourceCategoryId)
+            put("missingSourceCount", result.missingSourceCount)
+            put("syncPushed", result.syncPushed)
+            put("unmatchedSources", kotlinx.serialization.json.JsonArray(
+                result.unmatchedSources.map { kotlinx.serialization.json.JsonPrimitive(it) }
+            ))
+        })
+    }
+
+    /** Kick off the eager pass that binds imported entries to real Nyora sources. */
+    private fun handleBackupResolve(exchange: HttpExchange) {
+        if (!exchange.requestMethod.equals("POST", ignoreCase = true)) {
+            respondText(exchange, 405, "Method not allowed"); return
+        }
+        val started = backupResolver.start()
+        respondJson(exchange, 200, buildJsonObject {
+            put("ok", true)
+            put("started", started)
+            put("pending", backupResolveQueue.pending().size)
+        })
+    }
+
+    /**
+     * Lazy half of the hybrid: bind ONE entry now, e.g. when the user opens a
+     * still-unresolved title. Returns the real Nyora manga id on success.
+     */
+    private fun handleBackupResolveOne(exchange: HttpExchange) {
+        val mangaId = exchange.query()["mangaId"].orEmpty()
+        if (mangaId.isBlank()) {
+            respondError(exchange, 400, "mangaId is required"); return
+        }
+        val resolved = try {
+            backupResolver.resolveOne(mangaId)
+        } catch (e: Exception) {
+            respondError(exchange, 500, "Resolve failed: ${e.message}"); return
+        }
+        respondJson(exchange, 200, buildJsonObject {
+            put("ok", resolved != null)
+            put("mangaId", resolved ?: mangaId)
+            put("resolved", resolved != null)
+        })
+    }
+
+    private fun handleBackupResolveStop(exchange: HttpExchange) {
+        backupResolver.stop()
+        respondJson(exchange, 200, buildJsonObject { put("ok", true) })
+    }
+
+    private fun handleBackupResolveStatus(exchange: HttpExchange) {
+        val p = backupResolver.progress()
+        respondJson(exchange, 200, buildJsonObject {
+            put("running", p.running)
+            put("total", p.total)
+            put("done", p.done)
+            put("bound", p.bound)
+            put("failed", p.failed)
+            put("remaining", p.remaining)
         })
     }
 

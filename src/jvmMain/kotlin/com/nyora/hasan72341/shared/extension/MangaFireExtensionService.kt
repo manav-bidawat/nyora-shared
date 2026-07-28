@@ -19,12 +19,11 @@ import org.jsoup.Jsoup
 import com.nyora.hasan72341.shared.model.MangaSource as NyoraMangaSource
 
 /**
- * Native MangaFire source. MangaFire relaunched on a new backend backed by a clean
- * JSON API (`/api/titles`) — no vrf, no Cloudflare JS challenge, plain CDN images —
- * which the kotatsu-parsers-redo MangaFire (old `/filter` HTML + vrf + image
- * scrambling) no longer matches, so it returns nothing. This is a direct port of the
- * fix verified live in the Mihon extension to the new API. One catalog shared across
- * all MANGAFIRE_* sources; each source differs only in the chapter language it lists.
+ * Native MangaFire source. MangaFire relaunched on a JSON API (`/api/titles`) and now
+ * requires a build-specific `vrf` signature on protected API routes. The bundled
+ * kotatsu parser still targets the previous HTML/AJAX backend, so catalog, details,
+ * chapters and pages are handled here. One catalog is shared across all MANGAFIRE_*
+ * sources; each source differs only in the chapter language it lists.
  *
  * MangaFire blocks ALL datacenter IPs at the Cloudflare edge, so every request MUST go
  * through the residential-proxy-aware OkHttp client ([buildOkHttpClient]) — the same
@@ -70,22 +69,32 @@ class MangaFireExtensionService(
         .url(url)
         .header("Referer", "$baseUrl/")
         .header("Accept", "application/json")
+        .header("X-Requested-With", "XMLHttpRequest")
         .get()
         .build()
 
-    private suspend fun fetchBody(url: String): String = withContext(Dispatchers.IO) {
-        client.newCall(newRequest(url)).execute().use { response ->
-            if (!response.isSuccessful) error("MangaFire request failed with HTTP ${response.code}")
+    private fun protectedApiUrl(
+        relativePath: String,
+        params: List<Pair<String, String>> = emptyList(),
+    ) = "$baseUrl/api$relativePath".toHttpUrl().newBuilder()
+        .apply { params.forEach { (field, value) -> addQueryParameter(field, value) } }
+        .addQueryParameter("vrf", MangaFireVrf.token(relativePath, params))
+        .build()
+
+    private suspend fun fetchBody(url: okhttp3.HttpUrl): String = withContext(Dispatchers.IO) {
+        client.newCall(newRequest(url.toString())).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string().orEmpty().take(256)
+                error("MangaFire request failed with HTTP ${response.code}: $errorBody")
+            }
             response.body?.string().orEmpty()
         }
     }
 
     // -- browse ------------------------------------------------------------
     private suspend fun titles(params: List<Pair<String, String>>): MangaSearchPage {
-        val url = "$baseUrl/api/titles".toHttpUrl().newBuilder()
-            .apply { params.forEach { addQueryParameter(it.first, it.second) } }
-            .build()
-        val data = json.decodeFromString<ApiResponse<MangaDto>>(fetchBody(url.toString()))
+        val url = protectedApiUrl("/titles", params)
+        val data = json.decodeFromString<ApiResponse<MangaDto>>(fetchBody(url))
         return MangaSearchPage(
             entries = data.items.map { it.toNyora() },
             hasNextPage = data.meta?.hasNext ?: false,
@@ -112,21 +121,22 @@ class MangaFireExtensionService(
     override suspend fun getDetails(url: String): MangaDetails {
         val hid = getHid(url)
         val details = json.decodeFromString<MangaDetailsResponse>(
-            fetchBody("$baseUrl/api/titles/$hid"),
+            fetchBody(protectedApiUrl("/titles/$hid")),
         ).data.toNyora()
 
         val chapters = mutableListOf<MangaChapter>()
         var page = 1
         var lastPage: Int
         do {
-            val chaptersUrl = "$baseUrl/api/titles/$hid/chapters".toHttpUrl().newBuilder()
-                .addQueryParameter("language", langCode)
-                .addQueryParameter("sort", "number")
-                .addQueryParameter("order", "desc")
-                .addQueryParameter("page", "$page")
-                .addQueryParameter("limit", "200")
-                .build()
-            val data = json.decodeFromString<ApiResponse<ChapterDto>>(fetchBody(chaptersUrl.toString()))
+            val params = listOf(
+                "language" to langCode,
+                "sort" to "number",
+                "order" to "desc",
+                "page" to "$page",
+                "limit" to "200",
+            )
+            val chaptersUrl = protectedApiUrl("/titles/$hid/chapters", params)
+            val data = json.decodeFromString<ApiResponse<ChapterDto>>(fetchBody(chaptersUrl))
             data.items.forEach { chapters.add(it.toNyora(details.url, langCode)) }
             lastPage = data.meta?.lastPage ?: 1
             page++
@@ -144,12 +154,12 @@ class MangaFireExtensionService(
     override suspend fun getPageList(chapter: MangaChapter): List<MangaPage> {
         val segments = (baseUrl + chapter.url).toHttpUrl().pathSegments
         val last = segments.last()
-        val url = if (segments.contains("volume")) {
-            "$baseUrl/api/volumes/$last"
+        val relativePath = if (segments.contains("volume")) {
+            "/volumes/$last"
         } else {
-            "$baseUrl/api/chapters/${last.substringBefore("-")}"
+            "/chapters/${last.substringBefore("-")}"
         }
-        val data = json.decodeFromString<PagesResponse>(fetchBody(url))
+        val data = json.decodeFromString<PagesResponse>(fetchBody(protectedApiUrl(relativePath)))
         // Plain CDN images (no scrambling); image requests still need the Referer.
         return data.data.pages.map { MangaPage(url = it.url, headers = mapOf("Referer" to "$baseUrl/")) }
     }

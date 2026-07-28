@@ -1,5 +1,6 @@
 package com.nyora.hasan72341.shared.extension
 
+import com.nyora.hasan72341.shared.SourceGates
 import com.nyora.hasan72341.shared.SourcePatches
 import com.nyora.hasan72341.shared.model.MangaSource
 import com.nyora.hasan72341.shared.model.SourceContentType
@@ -16,7 +17,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
  */
 internal fun nativeParserCatalog(): List<MangaSource> =
     MangaParserSource.entries
-        .filterNot { it.isBroken }
+        .filterNot { it.isBroken && it.name !in SourceGates.REVIVED_SOURCES }
         .map { src ->
             MangaSource(
                 id = "parser:${src.name}",
