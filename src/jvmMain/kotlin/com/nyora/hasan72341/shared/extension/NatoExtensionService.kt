@@ -74,10 +74,38 @@ class NatoExtensionService(
     override suspend fun getLatest(page: Int): MangaSearchPage =
         listPage("$baseUrl/manga-list/latest-manga?page=${page.coerceAtLeast(1)}")
 
+    /**
+     * Search goes through the site's own JSON endpoint rather than the /search/story/ page.
+     * Cloudflare challenges the HTML but not this, so search keeps working with no clearance
+     * cookie — which is the difference between a usable source and an empty shelf on a helper
+     * that cannot solve a challenge. It answers with one un-paginated batch.
+     */
     override suspend fun search(query: String, page: Int, filters: List<SourceFilter>): MangaSearchPage {
-        val slug = searchSlug(query)
-        if (slug.isEmpty()) return MangaSearchPage(emptyList(), hasNextPage = false)
-        return listPage("$baseUrl/search/story/$slug?page=${page.coerceAtLeast(1)}")
+        if (page > 1) return MangaSearchPage(emptyList(), hasNextPage = false)
+        val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        val body = fetchBody("$baseUrl/home/search/json?searchword=$encoded", asJson = true)
+        // JSON array for single-token queries, rendered search-results HTML for multi-word ones
+        // (observed on all three domains, independent of space encoding). Accept both — the HTML
+        // uses the same story_item cards as SELECT_CARD.
+        if (!body.trimStart().startsWith("[")) {
+            val html = Jsoup.parse(body, baseUrl).select(SELECT_CARD).mapNotNull { it.toManga() }
+            return MangaSearchPage(entries = html, hasNextPage = false)
+        }
+        val hits = runCatching { json.decodeFromString<List<SearchDto>>(body) }.getOrNull().orEmpty()
+        val entries = hits.mapNotNull { dto ->
+            val slug = dto.slug.ifBlank { dto.url.trimEnd('/').substringAfterLast('/') }
+            if (slug.isBlank() || dto.name.isBlank()) return@mapNotNull null
+            val path = "/manga/$slug"
+            Manga(
+                id = nyoraId(path).toString(),
+                title = dto.name.trim(),
+                url = path,
+                publicUrl = baseUrl + path,
+                coverUrl = dto.thumb,
+                source = MangaSourceRef.Parser(sourceName),
+            )
+        }
+        return MangaSearchPage(entries = entries, hasNextPage = false)
     }
 
     private suspend fun listPage(url: String): MangaSearchPage {
@@ -126,7 +154,23 @@ class NatoExtensionService(
 
     override suspend fun getDetails(url: String): MangaDetails {
         val path = url.toPathOrNull() ?: url
-        val document = fetchDocument(baseUrl + path)
+        // Chapters come from the JSON API, which Cloudflare does not challenge, while the detail
+        // page HTML does get challenged — decisive on a headless helper, which cannot solve one.
+        // Fetch them first and independently so a missing clearance costs only the extra
+        // metadata, not the chapter list.
+        val chapterList = runCatching { chapters(path) }.getOrNull().orEmpty()
+        val document = runCatching { fetchDocument(baseUrl + path) }.getOrNull()
+            ?: return MangaDetails(
+                manga = Manga(
+                    id = nyoraId(path).toString(),
+                    title = path.trimEnd('/').substringAfterLast('/').replace('-', ' ')
+                        .replaceFirstChar { it.uppercaseChar() },
+                    url = path,
+                    publicUrl = baseUrl + path,
+                    source = MangaSourceRef.Parser(sourceName),
+                ),
+                chapters = chapterList,
+            )
         val info = document.select("div.manga-info-top li").associate { row ->
             row.text().substringBefore(':').trim().lowercase() to row.text().substringAfter(':').trim()
         }
@@ -158,7 +202,7 @@ class NatoExtensionService(
             tags = document.select("div.manga-info-top li:contains(Genres) a").mapNotNull { it.toTag() },
             source = MangaSourceRef.Parser(sourceName),
         )
-        return MangaDetails(manga = manga, chapters = chapters(path))
+        return MangaDetails(manga = manga, chapters = chapterList)
     }
 
     private fun Element.toTag(): MangaTag? {
@@ -175,17 +219,20 @@ class NatoExtensionService(
      */
     private suspend fun chapters(mangaPath: String): List<MangaChapter> {
         val slug = mangaPath.trimEnd('/').substringAfterLast('/')
-        val all = mutableListOf<ChapterDto>()
-        var offset = 0
-        while (true) {
-            val body = fetchBody("$baseUrl/api/manga/$slug/chapters?offset=$offset&limit=$CHAPTER_PAGE_SIZE", asJson = true)
-            val response = runCatching { json.decodeFromString<ChaptersResponse>(body) }.getOrNull() ?: break
-            all += response.data.chapters
-            offset += response.data.chapters.size
-            val pagination = response.data.pagination
-            if (response.data.chapters.isEmpty() || pagination?.hasMore != true) break
-            if (offset >= (pagination.total ?: 0)) break
-            if (all.size > CHAPTER_HARD_CAP) break // a runaway API must not hang a details request
+        // The site's own reader asks for limit=-1 and gets every chapter in one response
+        // (verified 3877/3877 on Martial Peak), so the default is a single request. The offset
+        // walk below is kept only for a mirror that ignores the sentinel and caps the page.
+        val first = fetchChapters(slug, offset = 0, limit = ALL_CHAPTERS)
+        val all = ArrayList(first?.data?.chapters.orEmpty())
+        val total = first?.data?.pagination?.total ?: 0
+        if (all.isNotEmpty() && all.size < total) {
+            var offset = all.size
+            while (all.size < total && all.size <= CHAPTER_HARD_CAP) {
+                val batch = fetchChapters(slug, offset, CHAPTER_PAGE_SIZE)?.data?.chapters.orEmpty()
+                if (batch.isEmpty()) break
+                all += batch
+                offset += batch.size
+            }
         }
         return all
             .asReversed() // API returns newest first; Nyora numbers ascending
@@ -199,6 +246,11 @@ class NatoExtensionService(
                     index = index,
                 )
             }
+    }
+
+    private suspend fun fetchChapters(slug: String, offset: Int, limit: Int): ChaptersResponse? {
+        val body = fetchBody("$baseUrl/api/manga/$slug/chapters?offset=$offset&limit=$limit", asJson = true)
+        return runCatching { json.decodeFromString<ChaptersResponse>(body) }.getOrNull()
     }
 
     // -- reader ------------------------------------------------------------
@@ -261,6 +313,14 @@ class NatoExtensionService(
     }
 
     @Serializable
+    private class SearchDto(
+        val name: String = "",
+        val slug: String = "",
+        val url: String = "",
+        val thumb: String = "",
+    )
+
+    @Serializable
     private class ChaptersResponse(val data: ChaptersData)
 
     @Serializable
@@ -283,15 +343,29 @@ class NatoExtensionService(
         @SerialName("updated_at") val updatedAt: String? = null,
     )
 
-    private companion object {
+    companion object {
         const val DEFAULT_DOMAIN = "www.manganato.gg"
+
+        /** Enum names this service serves; kept in step with JvmExtensionRuntime. */
+        val SOURCE_IDS = setOf(
+            "parser:MANGANATO",
+            "parser:MANGAKAKALOT",
+            "parser:MANGAKAKALOTTV",
+            "parser:MANGANELO_COM",
+        )
 
         val DOMAINS = mapOf(
             "MANGANATO" to "www.manganato.gg",
             "MANGAKAKALOT" to "www.mangakakalot.gg",
+            // mangakakalot.tv folded into .gg; MangaNelo.com now serves from nelomanga.net.
+            "MANGAKAKALOTTV" to "www.mangakakalot.gg",
+            "MANGANELO_COM" to "www.nelomanga.net",
         )
 
-        // Largest page the chapters endpoint honours; 3877 chapters is then 8 requests.
+        /** Sentinel the site's own reader uses: return every chapter in one response. */
+        const val ALL_CHAPTERS = -1
+
+        /** Fallback page size, only used if a mirror ignores [ALL_CHAPTERS]. */
         const val CHAPTER_PAGE_SIZE = 500
         const val CHAPTER_HARD_CAP = 20_000
 

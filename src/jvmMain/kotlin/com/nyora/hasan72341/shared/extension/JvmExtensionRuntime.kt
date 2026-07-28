@@ -15,6 +15,9 @@ class JvmExtensionRuntime(
             // kotatsu-parsers-redo MangaFire (old /filter HTML + vrf + scrambling)
             // now returns 0 results, so serve it from a native app-layer service.
             // Every MANGAFIRE_* language source (parser:MANGAFIRE_EN/ES/…) routes here.
+            // MangaNelo.com and Mangakakalot.tv are the same deployment as the two above and
+            // were falling through to the bundled Mangabox parser, which the rewritten site no
+            // longer matches (empty browse, zero chapters).
             when {
                 source.id.startsWith("parser:MANGAFIRE") -> MangaFireExtensionService(source, networkConfig)
                 // Toonily.me → toondex.io: rebuilt on the MangaBuddy JSON API (api.toondex.io);
@@ -24,8 +27,7 @@ class JvmExtensionRuntime(
                 // to /manga-list, chapters left the page for a /api/manga/<slug>/chapters JSON
                 // endpoint, and images need a site Referer. The bundled Mangabox parser matches
                 // none of that, so both are served natively.
-                source.id == "parser:MANGANATO" || source.id == "parser:MANGAKAKALOT" ->
-                    NatoExtensionService(source, networkConfig)
+                source.id in NatoExtensionService.SOURCE_IDS -> NatoExtensionService(source, networkConfig)
                 // MANGA Plus dropped the API's JSON mode, so the bundled parser's every
                 // request 403s. Served natively over the protobuf API the site's own client
                 // uses; one instance per language source (MANGAPLUSPARSER_EN/_ES/…).
