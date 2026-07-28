@@ -67,6 +67,9 @@ class KotatsuLoaderContext(
 
     override val httpClient: OkHttpClient by lazy {
         buildOkHttpClient(networkConfig.snapshot()).newBuilder()
+            .apply { if (System.getenv("NYORA_DEBUG_HTTP") != null) addInterceptor(DebugHttpInterceptor) }
+            .addInterceptor(RedirectedPostInterceptor)
+            .addInterceptor(MadaraChapterFix)
             .addInterceptor(Interceptor { chain -> parserInterceptor?.intercept(chain) ?: chain.proceed(chain.request()) })
             .build()
     }
@@ -107,5 +110,24 @@ class KotatsuLoaderContext(
             is ConfigKey.Domain -> (SourcePatches.DOMAIN_OVERRIDES[source.name] ?: key.defaultValue) as T
             else -> key.defaultValue
         }
+    }
+}
+
+/**
+ * Dumps outgoing parser requests when NYORA_DEBUG_HTTP is set. Off by default and
+ * never installed unless the variable is present, so it costs nothing in normal use.
+ */
+private object DebugHttpInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val body = (request.body as? okhttp3.FormBody)?.let { form ->
+            (0 until form.size).joinToString("&") { "${form.encodedName(it)}=${form.encodedValue(it)}" }
+        }
+        System.err.println("[http] ${request.method} ${request.url}")
+        request.headers.forEach { (name, value) -> System.err.println("[http]   $name: $value") }
+        if (body != null) System.err.println("[http]   body: $body")
+        val response = chain.proceed(request)
+        System.err.println("[http] <- ${response.code} ${request.url}")
+        return response
     }
 }

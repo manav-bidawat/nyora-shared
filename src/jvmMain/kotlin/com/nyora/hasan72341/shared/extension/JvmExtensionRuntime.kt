@@ -20,6 +20,17 @@ class JvmExtensionRuntime(
                 // Toonily.me → toondex.io: rebuilt on the MangaBuddy JSON API (api.toondex.io);
                 // the kotatsu Madtheme parser no longer matches. Serve natively.
                 source.id == "parser:TOONILY_ME" -> ToonDexExtensionService(source, networkConfig)
+                // Manganato and Mangakakalot run the same rewritten stack: the catalogue moved
+                // to /manga-list, chapters left the page for a /api/manga/<slug>/chapters JSON
+                // endpoint, and images need a site Referer. The bundled Mangabox parser matches
+                // none of that, so both are served natively.
+                source.id == "parser:MANGANATO" || source.id == "parser:MANGAKAKALOT" ->
+                    NatoExtensionService(source, networkConfig)
+                // MANGA Plus dropped the API's JSON mode, so the bundled parser's every
+                // request 403s. Served natively over the protobuf API the site's own client
+                // uses; one instance per language source (MANGAPLUSPARSER_EN/_ES/…).
+                source.id.startsWith("parser:MANGAPLUSPARSER") ->
+                    MangaPlusExtensionService(source, networkConfig)
                 else -> KotatsuParserExtensionService(source, networkConfig = networkConfig)
             }
         }
